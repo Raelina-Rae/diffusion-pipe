@@ -26,6 +26,7 @@ from utils import dataset as dataset_util
 from utils import common
 from utils.common import is_main_process, get_rank, DTYPE_MAP, empty_cuda_cache
 import utils.saver
+from utils import sampling as sampling_util
 from utils.isolate_rng import isolate_rng
 from utils.patches import apply_patches
 from utils.unsloth_utils import unsloth_checkpoint
@@ -910,6 +911,17 @@ if __name__ == '__main__':
 
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
             evaluate(model, model_engine, eval_dataloaders, tb_writer, x_axis, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
+
+        sampling_util.maybe_sample_during_training(
+            config=config,
+            model=model,
+            model_engine=model_engine,
+            run_dir=run_dir,
+            step=step,
+            epoch=epoch,
+            finished_epoch=finished_epoch,
+            disable_block_swap_for_eval=disable_block_swap_for_eval,
+        )
 
         if finished_epoch:
             if is_main_process():
