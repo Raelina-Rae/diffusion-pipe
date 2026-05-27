@@ -537,8 +537,11 @@ class SDXLPipeline(BasePipeline):
         latents = inputs['latents'].float()
         caption = inputs['caption']
         mask = inputs['mask']
-        input_ids = self._get_input_ids(caption, self.tokenizer)
-        input_ids_2 = self._get_input_ids(caption, self.tokenizer_2)
+        # Kohya-style long caption support: cap token length (e.g. 225) and rely on
+        # InitialLayer.get_prompt_embeds() to chunk into 75-token windows and concatenate.
+        max_token_length = self.model_config.get('max_token_length', None)
+        input_ids = self._get_input_ids(caption, self.tokenizer, max_token_length=max_token_length)
+        input_ids_2 = self._get_input_ids(caption, self.tokenizer_2, max_token_length=max_token_length)
 
         bs, channels, h, w = latents.shape
         device = latents.device
@@ -576,14 +579,21 @@ class SDXLPipeline(BasePipeline):
 
         return (noisy_latents, timesteps, input_ids, input_ids_2, add_time_ids), (target, mask)
 
-    def _get_input_ids(self, prompt, tokenizer):
-        input_ids = tokenizer(
-            prompt,
+    def _get_input_ids(self, prompt, tokenizer, max_token_length=None):
+        # Note: we intentionally do NOT add special tokens here. We add BOS/EOS in
+        # InitialLayer.get_prompt_embeds() per chunk so we can support >77 tokens.
+        tokenizer_kwargs = dict(
             padding="longest",
             truncation=False,
             add_special_tokens=False,
             return_tensors="pt",
-        ).input_ids.to(torch.int64)
+        )
+        if max_token_length is not None:
+            # Kohya's max_token_length refers to token count excluding special tokens.
+            tokenizer_kwargs["truncation"] = True
+            tokenizer_kwargs["max_length"] = int(max_token_length)
+
+        input_ids = tokenizer(prompt, **tokenizer_kwargs).input_ids.to(torch.int64)
         return input_ids
 
     def to_layers(self):
