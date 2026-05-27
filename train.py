@@ -912,7 +912,7 @@ if __name__ == '__main__':
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
             evaluate(model, model_engine, eval_dataloaders, tb_writer, x_axis, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
 
-        sampling_util.maybe_sample_during_training(
+        saved_samples = sampling_util.maybe_sample_during_training(
             config=config,
             model=model,
             model_engine=model_engine,
@@ -922,6 +922,17 @@ if __name__ == '__main__':
             finished_epoch=finished_epoch,
             disable_block_swap_for_eval=disable_block_swap_for_eval,
         )
+        if wandb_enable and is_main_process() and saved_samples:
+            to_log = []
+            for path, caption in saved_samples:
+                suffix = path.suffix.lower()
+                if suffix in (".png", ".jpg", ".jpeg", ".webp"):
+                    to_log.append(wandb.Image(str(path), caption=caption))
+                elif suffix in (".mp4", ".gif"):
+                    # W&B expects (T, C, H, W) or file path; passing path is simplest.
+                    to_log.append(wandb.Video(str(path), caption=caption, fps=config.get("sample_fps", 16), format=suffix.lstrip(".")))
+            if to_log:
+                wandb.log({"samples": to_log, "step": x_axis})
 
         if finished_epoch:
             if is_main_process():

@@ -76,6 +76,15 @@ def _make_sample_out_dir(run_dir: str | Path, step: int | None, epoch: int | Non
     return out_dir
 
 
+def _gl_style_stem(step: int | None, idx: int) -> str:
+    """
+    naming includes the global step so you can correlate progress.
+    """
+    if step is None:
+        return f"sample_{idx:04d}"
+    return f"{int(step):08d}_{idx:04d}"
+
+
 def _should_sample(config: dict[str, Any], step: int, epoch: int, finished_epoch: bool) -> bool:
     if not config.get("sample"):
         return False
@@ -105,34 +114,34 @@ def maybe_sample_during_training(
     epoch: int,
     finished_epoch: bool,
     disable_block_swap_for_eval: bool,
-) -> None:
+) -> list[tuple[Path, str]]:
     """
     Called inside the training loop.
 
     Sampling is best-effort and will log warnings if a model isn't supported.
     """
     if not is_main_process():
-        return
+        return []
     if not _should_sample(config, step, epoch, finished_epoch):
-        return
+        return []
 
     # Pipeline parallel training shards the model; sampling needs the full model on one process.
     if getattr(model_engine, "is_pipe_parallel", False):
         logger.warning("Sampling is skipped because pipeline parallelism is enabled (pipeline_stages > 1).")
-        return
+        return []
 
     sample_cfg_path = config.get("sample")
     if not sample_cfg_path:
-        return
+        return []
     sample_cfg_path = Path(sample_cfg_path)
     if not sample_cfg_path.is_file():
         logger.warning(f"Sample config {sample_cfg_path} does not exist, skipping sampling.")
-        return
+        return []
 
     sample_cfg = _load_sample_cfg(sample_cfg_path)
     if len(sample_cfg.prompts) == 0:
         logger.warning("No prompts found in sample config, skipping sampling.")
-        return
+        return []
 
     empty_cuda_cache()
     try:
@@ -144,11 +153,12 @@ def maybe_sample_during_training(
     model_type = config.get("model", {}).get("type")
     out_dir = _make_sample_out_dir(run_dir, step=step, epoch=epoch if finished_epoch else None)
 
+    saved: list[tuple[Path, str]] = []
     with torch.no_grad(), isolate_rng():
         if model_type == "sdxl":
-            _sample_sdxl_in_memory(model, sample_cfg, out_dir)
+            saved = _sample_sdxl_in_memory(model, sample_cfg, out_dir, step=step)
         elif model_type in ("cosmos_predict2", "anima"):
-            _sample_cosmos_predict2_in_memory(model, sample_cfg, out_dir)
+            saved = _sample_cosmos_predict2_in_memory(model, sample_cfg, out_dir, step=step)
         else:
             logger.warning(f"Sampling is not implemented for model.type={model_type!r}.")
 
@@ -157,16 +167,17 @@ def maybe_sample_during_training(
     except Exception:
         pass
     empty_cuda_cache()
+    return saved
 
 
-def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path) -> None:
+def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path, step: int | None) -> list[tuple[Path, str]]:
     """
     Uses the in-memory Diffusers SDXL pipeline held by `models/sdxl.py`.
     """
     pipe = getattr(model, "diffusers_pipeline", None)
     if pipe is None:
         logger.warning("SDXL sampling failed: model.diffusers_pipeline is missing.")
-        return
+        return []
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pipe = pipe.to(device)
@@ -182,6 +193,7 @@ def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path) 
         generator.manual_seed(int(sample_cfg.seed))
 
     img_idx = 0
+    saved: list[tuple[Path, str]] = []
     for p in sample_cfg.prompts:
         images = pipe(
             prompt=[p.prompt] * sample_cfg.batch_size,
@@ -194,13 +206,17 @@ def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path) 
         ).images
 
         for img in images:
-            img.save(out_dir / f"sample_{img_idx:04d}.png")
+            stem = _gl_style_stem(step, img_idx)
+            out_path = out_dir / f"{stem}.png"
+            img.save(out_path)
+            saved.append((out_path, f"{p.prompt}\nNEG: {p.negative_prompt}".strip()))
             img_idx += 1
 
     if was_training:
         pipe.unet.train()
         pipe.text_encoder.train()
         pipe.text_encoder_2.train()
+    return saved
 
 
 def _cosmos_text_conditioning(model: Any, prompt: str, negative_prompt: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -223,19 +239,26 @@ def _cosmos_text_conditioning(model: Any, prompt: str, negative_prompt: str) -> 
     # If the model uses the LLM adapter, apply it to both pos/neg embeddings.
     if getattr(model, "use_llm_adapter", False) and getattr(model.transformer, "llm_adapter", None) is not None:
         llm_adapter = model.transformer.llm_adapter
+        try:
+            llm_adapter_device = next(llm_adapter.parameters()).device
+        except StopIteration:
+            llm_adapter_device = pos_emb.device
+        # Ensure embeddings are on the same device as adapter weights.
+        pos_emb = pos_emb.to(llm_adapter_device)
+        neg_emb = neg_emb.to(llm_adapter_device)
         pos_emb = llm_adapter(
             source_hidden_states=pos_emb,
-            target_input_ids=t5_pos_batch.input_ids.to(llm_adapter.device),
-            target_attention_mask=t5_pos_batch.attention_mask.to(llm_adapter.device),
-            source_attention_mask=pos_batch.attention_mask.to(llm_adapter.device),
+            target_input_ids=t5_pos_batch.input_ids.to(llm_adapter_device),
+            target_attention_mask=t5_pos_batch.attention_mask.to(llm_adapter_device),
+            source_attention_mask=pos_batch.attention_mask.to(llm_adapter_device),
         )
         pos_emb[~t5_pos_batch.attention_mask.bool().to(pos_emb.device)] = 0
 
         neg_emb = llm_adapter(
             source_hidden_states=neg_emb,
-            target_input_ids=t5_neg_batch.input_ids.to(llm_adapter.device),
-            target_attention_mask=t5_neg_batch.attention_mask.to(llm_adapter.device),
-            source_attention_mask=neg_batch.attention_mask.to(llm_adapter.device),
+            target_input_ids=t5_neg_batch.input_ids.to(llm_adapter_device),
+            target_attention_mask=t5_neg_batch.attention_mask.to(llm_adapter_device),
+            source_attention_mask=neg_batch.attention_mask.to(llm_adapter_device),
         )
         neg_emb[~t5_neg_batch.attention_mask.bool().to(neg_emb.device)] = 0
 
@@ -395,7 +418,7 @@ def _load_wan_vae_model_for_sampling(model: Any, device: torch.device, dtype: to
     return new_vae, scale
 
 
-def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path) -> None:
+def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path, step: int | None) -> list[tuple[Path, str]]:
     """
     Rectified-flow Euler sampler for Cosmos Predict2 / Anima.
     Generates either:
@@ -406,7 +429,7 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
     vae = getattr(model, "vae", None)
     if transformer is None or vae is None:
         logger.warning("CosmosPredict2/Anima sampling failed: model.transformer or model.vae is missing.")
-        return
+        return []
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = model.model_config["dtype"]
@@ -431,6 +454,7 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
     dt = 1.0 / float(sample_cfg.num_inference_steps)
 
     sample_idx = 0
+    saved: list[tuple[Path, str]] = []
     for sp in sample_cfg.prompts:
         for _ in range(sample_cfg.batch_size):
             pos_emb, neg_emb, pos_mask, neg_mask = _cosmos_text_conditioning(model, sp.prompt, sp.negative_prompt or "")
@@ -463,13 +487,19 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
             if decoded.shape[1] == 1:
                 img = decoded[:, 0, ...].clamp(0, 1)
                 pil_img = torchvision.transforms.functional.to_pil_image(img.cpu())
-                pil_img.save(out_dir / f"sample_{sample_idx:04d}.png")
+                stem = _gl_style_stem(step, sample_idx)
+                out_path = out_dir / f"{stem}.png"
+                pil_img.save(out_path)
+                saved.append((out_path, f"{sp.prompt}\nNEG: {sp.negative_prompt}".strip()))
             else:
                 # (C,T,H,W) -> (T,H,W,C) uint8
                 video = decoded.permute(1, 2, 3, 0).clamp(0, 1)
                 video = (video * 255).to(torch.uint8).cpu().numpy()
-                out_path = out_dir / f"sample_{sample_idx:04d}.mp4"
+                stem = _gl_style_stem(step, sample_idx)
+                out_path = out_dir / f"{stem}.mp4"
                 imageio.v3.imwrite(out_path, video, fps=sample_cfg.fps)
+                saved.append((out_path, f"{sp.prompt}\nNEG: {sp.negative_prompt}".strip()))
 
             sample_idx += 1
+    return saved
 
