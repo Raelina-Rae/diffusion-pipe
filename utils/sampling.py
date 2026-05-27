@@ -240,6 +240,69 @@ def _cosmos_text_conditioning(model: Any, prompt: str, negative_prompt: str) -> 
     return pos_emb, neg_emb, pos_batch.attention_mask, neg_batch.attention_mask
 
 
+def _load_wan_vae_model_for_sampling(model: Any, device: torch.device, dtype: torch.dtype):
+    """
+    CosmosPredict2Pipeline stores a WanVAE wrapper in `model.vae`.
+
+    In some setups the VAE weights may remain on meta tensors until first use. This helper
+    ensures we have a real materialized VAE module on `device` for decoding.
+    """
+    vae_wrapper = getattr(model, "vae", None)
+    if vae_wrapper is None or getattr(vae_wrapper, "model", None) is None:
+        raise RuntimeError("model.vae.model is missing")
+
+    vae_model = vae_wrapper.model
+    # If any parameter is meta, we need to materialize then load weights.
+    try:
+        p = next(vae_model.parameters())
+        is_meta = getattr(p, "is_meta", False)
+    except StopIteration:
+        is_meta = False
+
+    if not is_meta:
+        return vae_model.to(device), vae_wrapper.scale
+
+    logger.warning("VAE parameters are on meta device; materializing VAE with to_empty() then loading weights.")
+
+    from models.wan.vae2_1 import WanVAE_  # same module used by models/cosmos_predict2.py
+    from utils.common import load_state_dict
+
+    vae_path = model.model_config.get("vae_path")
+    if not vae_path:
+        raise RuntimeError("model.model_config.vae_path is missing (required to load meta VAE weights for sampling)")
+
+    # Recreate config used in models/cosmos_predict2.py:_video_vae
+    cfg = dict(
+        dim=96,
+        z_dim=16,
+        dim_mult=[1, 2, 4, 4],
+        num_res_blocks=2,
+        attn_scales=[],
+        temperal_downsample=[False, True, True],
+        dropout=0.0,
+    )
+
+    with torch.device("meta"):
+        new_vae = WanVAE_(**cfg)
+
+    # Materialize on target device, then load weights.
+    new_vae = new_vae.to_empty(device=device)
+    sd = load_state_dict(vae_path)
+    missing_keys, unexpected_keys = new_vae.load_state_dict(sd, strict=False)
+    if len(unexpected_keys) > 0:
+        logger.warning(f"Unexpected VAE keys when loading for sampling: {unexpected_keys[:5]} ...")
+    if len(missing_keys) > 0:
+        logger.warning(f"Missing VAE keys when loading for sampling: {missing_keys[:5]} ...")
+
+    new_vae = new_vae.to(device=device, dtype=dtype).eval()
+
+    # Ensure scale tensors exist on device/dtype
+    mean = vae_wrapper.mean.to(device=device, dtype=dtype)
+    std = vae_wrapper.std.to(device=device, dtype=dtype)
+    scale = [mean, 1.0 / std]
+    return new_vae, scale
+
+
 def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path) -> None:
     """
     Rectified-flow Euler sampler for Cosmos Predict2 / Anima.
@@ -259,9 +322,8 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
     transformer = transformer.to(device)
     transformer.eval()
 
-    # WanVAE wrapper stores `vae.model` and `vae.scale`
-    vae_model = vae.model.to(device)
-    vae_model.eval()
+    # WanVAE wrapper stores `vae.model` and `vae.scale`, but the module may still be meta.
+    vae_model, vae_scale = _load_wan_vae_model_for_sampling(model, device=device, dtype=dtype)
 
     generator = torch.Generator(device=device)
     if sample_cfg.seed is not None:
@@ -303,7 +365,7 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
                 x = x - v * dt
 
             latents = x
-            decoded = vae_model.decode(latents, vae.scale).float().clamp_(-1, 1).squeeze(0)  # (C,T,H,W)
+            decoded = vae_model.decode(latents, vae_scale).float().clamp_(-1, 1).squeeze(0)  # (C,T,H,W)
             decoded = (decoded + 1) / 2
 
             if decoded.shape[1] == 1:
