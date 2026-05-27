@@ -207,6 +207,8 @@ def _cosmos_text_conditioning(model: Any, prompt: str, negative_prompt: str) -> 
     # Import helpers from the model module so we match training behavior.
     from models import cosmos_predict2 as cosmos_mod
 
+    _ensure_cosmos_text_encoder_materialized_for_sampling(model)
+
     tokenizer = model.tokenizer
     t5_tokenizer = model.t5_tokenizer
 
@@ -238,6 +240,96 @@ def _cosmos_text_conditioning(model: Any, prompt: str, negative_prompt: str) -> 
         neg_emb[~t5_neg_batch.attention_mask.bool().to(neg_emb.device)] = 0
 
     return pos_emb, neg_emb, pos_batch.attention_mask, neg_batch.attention_mask
+
+
+def _ensure_cosmos_text_encoder_materialized_for_sampling(model: Any) -> None:
+    """
+    Some configs initialize the Anima/Cosmos text encoder on meta (especially when using init_empty_weights
+    plus lazy loading / offloading). For sampling we need a real module on CPU so tokenization + HF masking works.
+    """
+    text_encoder = getattr(model, "text_encoder", None)
+    if text_encoder is None:
+        raise RuntimeError("model.text_encoder is missing")
+
+    try:
+        p = next(text_encoder.parameters())
+        is_meta = getattr(p, "is_meta", False)
+    except StopIteration:
+        is_meta = False
+
+    if not is_meta:
+        # Make sure it's on CPU to avoid VRAM spikes during sampling.
+        try:
+            text_encoder.to("cpu")
+        except Exception:
+            pass
+        return
+
+    logger.warning("Text encoder parameters are on meta device; reloading text encoder weights for sampling on CPU.")
+
+    import transformers
+    from transformers import T5TokenizerFast, T5EncoderModel, AutoTokenizer, AutoModelForCausalLM
+    from accelerate import init_empty_weights
+    from accelerate.utils import set_module_tensor_to_device
+    from utils.common import load_state_dict, iterate_safetensors
+
+    mc = model.model_config
+    dtype = mc["dtype"]
+
+    if "t5_path" in mc:
+        # Cosmos T5 path
+        t5_state_dict = load_state_dict(mc["t5_path"])
+        if mc.get("text_encoder_nf4", False):
+            quantization_config = transformers.BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=dtype,
+            )
+        else:
+            quantization_config = None
+        te = T5EncoderModel.from_pretrained(
+            None,
+            config="configs/t5_old/config.json",
+            state_dict=t5_state_dict,
+            torch_dtype="auto",
+            local_files_only=True,
+            quantization_config=quantization_config,
+        )
+        if quantization_config is None and mc.get("text_encoder_fp8", False):
+            for name, p in te.named_parameters():
+                if p.ndim == 2 and not ("shared" in name or "relative_attention_bias" in name):
+                    p.data = p.data.to(torch.float8_e4m3fn)
+        model.tokenizer = model.t5_tokenizer  # align with training behavior for Cosmos
+        model.text_encoder = te
+        model.is_generic_llm = False
+    elif "llm_path" in mc:
+        llm_path = mc["llm_path"]
+        if isinstance(llm_path, str) and Path(llm_path).is_dir():
+            # generic Transformers LLM
+            model.tokenizer = AutoTokenizer.from_pretrained(llm_path, local_files_only=True)
+            text_encoder_full = AutoModelForCausalLM.from_pretrained(llm_path, dtype=dtype, local_files_only=True)
+        else:
+            # assume Qwen3-0.6b (Anima)
+            model.tokenizer = AutoTokenizer.from_pretrained("configs/qwen3_06b", local_files_only=True)
+            llm_config = transformers.Qwen3Config.from_pretrained("configs/qwen3_06b", local_files_only=True)
+            with init_empty_weights():
+                text_encoder_full = transformers.Qwen3ForCausalLM(llm_config)
+            for key, tensor in iterate_safetensors(llm_path):
+                set_module_tensor_to_device(text_encoder_full, key, device="cpu", dtype=dtype, value=tensor)
+
+        # Training uses the decoder model's `.model` (base) as the encoder here.
+        model.text_encoder = text_encoder_full.model
+        if model.tokenizer.pad_token is None:
+            model.tokenizer.pad_token = model.tokenizer.eos_token
+        model.text_encoder.config.use_cache = False
+        model.is_generic_llm = True
+    else:
+        raise RuntimeError("Missing text encoder path in model config (need t5_path or llm_path)")
+
+    # Ensure it's real and on CPU
+    model.text_encoder.to("cpu")
+    model.text_encoder.eval()
+    model.text_encoder.requires_grad_(False)
 
 
 def _load_wan_vae_model_for_sampling(model: Any, device: torch.device, dtype: torch.dtype):
