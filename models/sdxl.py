@@ -12,6 +12,7 @@ from safetensors.torch import save_file
 
 from models.base import BasePipeline, make_contiguous
 from utils.common import AUTOCAST_DTYPE, is_main_process
+from utils.lokr import LoKrModule, apply_lokr_to_model, get_lokr_state_dict, load_lokr_state_dict
 
 
 
@@ -429,25 +430,26 @@ class SDXLPipeline(BasePipeline):
         return []
 
     def configure_adapter(self, adapter_config):
-        if 'init_from_existing' in adapter_config:
-            # For this model, load_adapter_weights() both creates the LoRA and loads its weights.
+        adapter_type = adapter_config['type']
+        if adapter_type == 'lora' and 'init_from_existing' in adapter_config:
+            # For LoRA, load_adapter_weights() both creates the LoRA and loads its weights.
             return
 
-        # Target all linear layers in the main blocks.
+        # For LoKR with init_from_existing, we still need to create the modules first.
         self._add_adapter(adapter_config, self.unet, [self.unet.down_blocks, self.unet.mid_block, self.unet.up_blocks], state_dict_key_prefix='unet.')
-        # Target all linear layers in the text encoder.
         self._add_adapter(adapter_config, self.text_encoder, [self.text_encoder], state_dict_key_prefix='text_encoder.')
         self._add_adapter(adapter_config, self.text_encoder_2, [self.text_encoder_2], state_dict_key_prefix='text_encoder_2.')
 
     def _add_adapter(self, adapter_config, top_level_module, target_modules, state_dict_key_prefix=''):
         adapter_type = adapter_config['type']
-        target_linear_modules = []
-        for target_module in target_modules:
-            for name, submodule in target_module.named_modules():
-                if isinstance(submodule, nn.Linear):
-                    target_linear_modules.append(name)
 
         if adapter_type == 'lora':
+            target_linear_modules = []
+            for target_module in target_modules:
+                for name, submodule in target_module.named_modules():
+                    if isinstance(submodule, nn.Linear):
+                        target_linear_modules.append(name)
+
             peft_config = peft.LoraConfig(
                 r=adapter_config['rank'],
                 lora_alpha=adapter_config['alpha'],
@@ -455,22 +457,69 @@ class SDXLPipeline(BasePipeline):
                 bias='none',
                 target_modules=target_linear_modules
             )
+            top_level_module.add_adapter(peft_config)
+            for name, p in top_level_module.named_parameters():
+                p.original_name = state_dict_key_prefix + name
+                if p.requires_grad:
+                    p.data = p.data.to(adapter_config['dtype'])
+        elif adapter_type == 'lokr':
+            r = adapter_config['rank']
+            alpha = adapter_config['alpha']
+            dropout = adapter_config.get('dropout', 0.0)
+            factor = adapter_config.get('factor', -1)
+            full_matrix = adapter_config.get('full_matrix', False)
+            use_tucker = adapter_config.get('use_tucker', False)
+            decompose_both = adapter_config.get('decompose_both', False)
+            conv_r = adapter_config.get('conv_dim', None)
+            conv_alpha = adapter_config.get('conv_alpha', None)
+            preset = adapter_config.get('preset', 'attn-mlp')
+            target_layers = set()
+            if preset == 'full' or preset == 'attn-mlp':
+                target_layers.add('linear')
+            if preset == 'full':
+                target_layers.add('conv2d')
+
+            for p in top_level_module.parameters():
+                p.requires_grad_(False)
+
+            for target_module in target_modules:
+                for name, submodule in target_module.named_modules():
+                    is_linear = isinstance(submodule, nn.Linear) and 'linear' in target_layers
+                    is_conv2d = isinstance(submodule, nn.Conv2d) and 'conv2d' in target_layers
+                    if not is_linear and not is_conv2d:
+                        continue
+                    parts = name.split('.')
+                    parent = target_module
+                    for part in parts[:-1]:
+                        parent = getattr(parent, part)
+
+                    lokr = LoKrModule(
+                        submodule, r=r, alpha=alpha, dropout=dropout, factor=factor,
+                        full_matrix=full_matrix, use_tucker=use_tucker,
+                        decompose_both=decompose_both,
+                        conv_r=conv_r, conv_alpha=conv_alpha,
+                    )
+                    lokr = lokr.to(dtype=submodule.weight.dtype, device=submodule.weight.device)
+                    setattr(parent, parts[-1], lokr)
+
+            for name, p in top_level_module.named_parameters():
+                if any(kw in name for kw in ['lokr_w', 'lokr_t']):
+                    p.requires_grad_(True)
+                    p.original_name = state_dict_key_prefix + name
+                    p.data = p.data.to(adapter_config['dtype'])
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
-        top_level_module.add_adapter(peft_config)
-        for name, p in top_level_module.named_parameters():
-            p.original_name = state_dict_key_prefix + name
-            if p.requires_grad:
-                p.data = p.data.to(adapter_config['dtype'])
 
-    def save_adapter(self, save_dir, peft_state_dict):
+    def save_adapter(self, save_dir, state_dict):
         adapter_type = self.config['adapter']['type']
         if adapter_type == 'lora':
             # TODO: should we do any additional checks here? This helpful function appears to completely convert
             # the PEFT format state_dict to kohya format. Every key in the lora is correctly loaded by Forge.
             # But all these different formats are a mess and I hardly understand it. This seems to work though.
-            kohya_sd = diffusers.utils.state_dict_utils.convert_state_dict_to_kohya(peft_state_dict)
+            kohya_sd = diffusers.utils.state_dict_utils.convert_state_dict_to_kohya(state_dict)
             safetensors.torch.save_file(kohya_sd, save_dir / 'lora.safetensors', metadata={'format': 'pt'})
+        elif adapter_type == 'lokr':
+            safetensors.torch.save_file(state_dict, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 
@@ -482,8 +531,14 @@ class SDXLPipeline(BasePipeline):
         if len(safetensors_files) > 1:
             raise RuntimeError(f'Multiple safetensors files found in {adapter_path}')
         adapter_state_dict = safetensors.torch.load_file(safetensors_files[0])
-        self.diffusers_pipeline.load_lora_weights(adapter_state_dict, adapter_name='default')
-        self._set_param_original_name()
+        if any('.lokr_w' in k for k in adapter_state_dict):
+            load_lokr_state_dict(self.unet, adapter_state_dict)
+            load_lokr_state_dict(self.text_encoder, adapter_state_dict)
+            load_lokr_state_dict(self.text_encoder_2, adapter_state_dict)
+            self._set_param_original_name()
+        else:
+            self.diffusers_pipeline.load_lora_weights(adapter_state_dict, adapter_name='default')
+            self._set_param_original_name()
 
     def save_model(self, save_dir, diffusers_sd):
         unet_state_dict, text_enc_dict, text_enc_2_dict = {}, {}, {}

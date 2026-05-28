@@ -124,6 +124,22 @@ def set_config_defaults(config):
             adapter_config.setdefault('dropout', 0.0)
             adapter_config.setdefault('dtype', model_dtype_str)
             adapter_config['dtype'] = DTYPE_MAP[adapter_config['dtype']]
+        elif adapter_config['type'] == 'lokr':
+            if 'alpha' in adapter_config:
+                raise NotImplementedError(
+                    'This script forces alpha=rank to make the saved LoKR format simpler. Please remove alpha from the config.'
+                )
+            adapter_config['alpha'] = adapter_config['rank']
+            if 'conv_alpha' in adapter_config and 'conv_dim' not in adapter_config:
+                raise NotImplementedError('conv_alpha requires conv_dim to be set.')
+            adapter_config.setdefault('dropout', 0.0)
+            adapter_config.setdefault('factor', -1)
+            adapter_config.setdefault('full_matrix', False)
+            adapter_config.setdefault('use_tucker', False)
+            adapter_config.setdefault('decompose_both', False)
+            adapter_config.setdefault('preset', 'attn-mlp')
+            adapter_config.setdefault('dtype', model_dtype_str)
+            adapter_config['dtype'] = DTYPE_MAP[adapter_config['dtype']]
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 
@@ -552,7 +568,7 @@ if __name__ == '__main__':
     # Block swapping
     if blocks_to_swap := config.get('blocks_to_swap', 0):
         assert config['pipeline_stages'] == 1, 'Block swapping only works with pipeline_stages=1'
-        assert 'adapter' in config, 'Block swapping only works when training LoRA'
+        assert 'adapter' in config, 'Block swapping only works when training with an adapter (LoRA/LoKR)'
         # Don't automatically move to GPU, we'll do that ourselves.
         def to(self, *args, **kwargs):
             pass
@@ -807,7 +823,7 @@ if __name__ == '__main__':
 
     # Might be useful because we set things in fp16 / bf16 without explicitly enabling Deepspeed fp16 mode.
     # Unsure if really needed.
-    communication_data_type = config['lora']['dtype'] if 'lora' in config else config['model']['dtype']
+    communication_data_type = config['adapter']['dtype'] if 'adapter' in config else config['model']['dtype']
     model_engine.communication_data_type = communication_data_type
 
     train_dataloader = dataset_util.PipelineDataLoader(train_data, model_engine, model_engine.gradient_accumulation_steps(), model)

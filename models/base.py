@@ -18,6 +18,7 @@ from torchvision import transforms
 import imageio
 
 from utils.common import is_main_process, VIDEO_EXTENSIONS, round_to_nearest_multiple, round_down_to_multiple
+from utils.lokr import LoKrModule, apply_lokr_to_model, get_lokr_state_dict, load_lokr_state_dict
 import comfy.utils
 import comfy.sd
 import comfy.sd1_clip
@@ -177,17 +178,17 @@ class BasePipeline:
         raise NotImplementedError()
 
     def configure_adapter(self, adapter_config):
-        target_linear_modules = set()
-        for name, module in self.transformer.named_modules():
-            if module.__class__.__name__ not in self.adapter_target_modules:
-                continue
-            for full_submodule_name, submodule in module.named_modules(prefix=name):
-                if isinstance(submodule, nn.Linear):
-                    target_linear_modules.add(full_submodule_name)
-        target_linear_modules = list(target_linear_modules)
-
         adapter_type = adapter_config['type']
         if adapter_type == 'lora':
+            target_linear_modules = set()
+            for name, module in self.transformer.named_modules():
+                if module.__class__.__name__ not in self.adapter_target_modules:
+                    continue
+                for full_submodule_name, submodule in module.named_modules(prefix=name):
+                    if isinstance(submodule, nn.Linear):
+                        target_linear_modules.add(full_submodule_name)
+            target_linear_modules = list(target_linear_modules)
+
             peft_config = peft.LoraConfig(
                 r=adapter_config['rank'],
                 lora_alpha=adapter_config['alpha'],
@@ -195,18 +196,30 @@ class BasePipeline:
                 bias='none',
                 target_modules=target_linear_modules
             )
+            self.peft_config = peft_config
+            self.lora_model = peft.get_peft_model(self.transformer, peft_config)
+            if is_main_process():
+                self.lora_model.print_trainable_parameters()
+            for name, p in self.transformer.named_parameters():
+                p.original_name = name
+                if p.requires_grad:
+                    p.data = p.data.to(adapter_config['dtype'])
+        elif adapter_type == 'lokr':
+            apply_lokr_to_model(
+                self.transformer, adapter_config,
+                target_module_classes=self.adapter_target_modules,
+            )
+            for name, p in self.transformer.named_parameters():
+                if any(kw in name for kw in ['lokr_w', 'lokr_t']):
+                    p.original_name = name
+                    p.data = p.data.to(adapter_config['dtype'])
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
-        self.peft_config = peft_config
-        self.lora_model = peft.get_peft_model(self.transformer, peft_config)
-        if is_main_process():
-            self.lora_model.print_trainable_parameters()
-        for name, p in self.transformer.named_parameters():
-            p.original_name = name
-            if p.requires_grad:
-                p.data = p.data.to(adapter_config['dtype'])
 
-    def save_adapter(self, save_dir, peft_state_dict):
+    def save_adapter(self, save_dir, state_dict):
+        if any('.lokr_w' in k for k in state_dict):
+            safetensors.torch.save_file(state_dict, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
+            return
         raise NotImplementedError()
 
     def load_adapter_weights(self, adapter_path):
@@ -218,17 +231,18 @@ class BasePipeline:
         if len(safetensors_files) > 1:
             raise RuntimeError(f'Multiple safetensors files found in {adapter_path}')
         adapter_state_dict = safetensors.torch.load_file(safetensors_files[0])
-        modified_state_dict = {}
-        model_parameters = set(name for name, p in self.transformer.named_parameters())
-        for k, v in adapter_state_dict.items():
-            # Replace Diffusers or ComfyUI prefix
-            k = re.sub(r'^(transformer|diffusion_model)\.', '', k)
-            # Replace weight at end for LoRA format
-            k = re.sub(r'\.weight$', '.default.weight', k)
-            if k not in model_parameters:
-                raise RuntimeError(f'modified_state_dict key {k} is not in the model parameters')
-            modified_state_dict[k] = v
-        self.transformer.load_state_dict(modified_state_dict, strict=False)
+        if any('.lokr_w' in k for k in adapter_state_dict):
+            load_lokr_state_dict(self.transformer, adapter_state_dict)
+        else:
+            modified_state_dict = {}
+            model_parameters = set(name for name, p in self.transformer.named_parameters())
+            for k, v in adapter_state_dict.items():
+                k = re.sub(r'^(transformer|diffusion_model)\.', '', k)
+                k = re.sub(r'\.weight$', '.default.weight', k)
+                if k not in model_parameters:
+                    raise RuntimeError(f'modified_state_dict key {k} is not in the model parameters')
+                modified_state_dict[k] = v
+            self.transformer.load_state_dict(modified_state_dict, strict=False)
 
     def load_and_fuse_adapter(self, path):
         peft_config = peft.LoraConfig.from_pretrained(path)
@@ -466,17 +480,17 @@ class ComfyPipeline:
         return self.text_encoders
 
     def configure_adapter(self, adapter_config):
-        target_linear_modules = set()
-        for name, module in self.diffusion_model.named_modules():
-            if module.__class__.__name__ not in self.adapter_target_modules:
-                continue
-            for full_submodule_name, submodule in module.named_modules(prefix=name):
-                if isinstance(submodule, nn.Linear):
-                    target_linear_modules.add(full_submodule_name)
-        target_linear_modules = list(target_linear_modules)
-
         adapter_type = adapter_config['type']
         if adapter_type == 'lora':
+            target_linear_modules = set()
+            for name, module in self.diffusion_model.named_modules():
+                if module.__class__.__name__ not in self.adapter_target_modules:
+                    continue
+                for full_submodule_name, submodule in module.named_modules(prefix=name):
+                    if isinstance(submodule, nn.Linear):
+                        target_linear_modules.add(full_submodule_name)
+            target_linear_modules = list(target_linear_modules)
+
             peft_config = peft.LoraConfig(
                 r=adapter_config['rank'],
                 lora_alpha=adapter_config['alpha'],
@@ -484,22 +498,33 @@ class ComfyPipeline:
                 bias='none',
                 target_modules=target_linear_modules
             )
+            self.peft_config = peft_config
+            self.lora_model = peft.get_peft_model(self.diffusion_model, peft_config)
+            if is_main_process():
+                self.lora_model.print_trainable_parameters()
+            for name, p in self.diffusion_model.named_parameters():
+                p.original_name = name
+                if p.requires_grad:
+                    p.data = p.data.to(adapter_config['dtype'])
+        elif adapter_type == 'lokr':
+            apply_lokr_to_model(
+                self.diffusion_model, adapter_config,
+                target_module_classes=self.adapter_target_modules,
+            )
+            for name, p in self.diffusion_model.named_parameters():
+                if any(kw in name for kw in ['lokr_w', 'lokr_t']):
+                    p.original_name = name
+                    p.data = p.data.to(adapter_config['dtype'])
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
-        self.peft_config = peft_config
-        self.lora_model = peft.get_peft_model(self.diffusion_model, peft_config)
-        if is_main_process():
-            self.lora_model.print_trainable_parameters()
-        for name, p in self.diffusion_model.named_parameters():
-            p.original_name = name
-            if p.requires_grad:
-                p.data = p.data.to(adapter_config['dtype'])
 
     def save_adapter(self, save_dir, sd):
-        self.peft_config.save_pretrained(save_dir)
-        # ComfyUI format.
-        sd = {'diffusion_model.'+k: v for k, v in sd.items()}
-        safetensors.torch.save_file(sd, save_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
+        if any('.lokr_w' in k for k in sd):
+            safetensors.torch.save_file(sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
+        else:
+            self.peft_config.save_pretrained(save_dir)
+            sd = {'diffusion_model.'+k: v for k, v in sd.items()}
+            safetensors.torch.save_file(sd, save_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
 
     def load_adapter_weights(self, adapter_path):
         if is_main_process():
@@ -510,17 +535,18 @@ class ComfyPipeline:
         if len(safetensors_files) > 1:
             raise RuntimeError(f'Multiple safetensors files found in {adapter_path}')
         adapter_state_dict = safetensors.torch.load_file(safetensors_files[0])
-        modified_state_dict = {}
-        model_parameters = set(name for name, p in self.diffusion_model.named_parameters())
-        for k, v in adapter_state_dict.items():
-            # Replace Diffusers or ComfyUI prefix
-            k = re.sub(r'^(transformer|diffusion_model)\.', '', k)
-            # Replace weight at end for LoRA format
-            k = re.sub(r'\.weight$', '.default.weight', k)
-            if k not in model_parameters:
-                raise RuntimeError(f'modified_state_dict key {k} is not in the model parameters')
-            modified_state_dict[k] = v
-        self.diffusion_model.load_state_dict(modified_state_dict, strict=False)
+        if any('.lokr_w' in k for k in adapter_state_dict):
+            load_lokr_state_dict(self.diffusion_model, adapter_state_dict)
+        else:
+            modified_state_dict = {}
+            model_parameters = set(name for name, p in self.diffusion_model.named_parameters())
+            for k, v in adapter_state_dict.items():
+                k = re.sub(r'^(transformer|diffusion_model)\.', '', k)
+                k = re.sub(r'\.weight$', '.default.weight', k)
+                if k not in model_parameters:
+                    raise RuntimeError(f'modified_state_dict key {k} is not in the model parameters')
+                modified_state_dict[k] = v
+            self.diffusion_model.load_state_dict(modified_state_dict, strict=False)
 
     def load_and_fuse_adapter(self, path):
         raise NotImplementedError()

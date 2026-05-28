@@ -313,11 +313,13 @@ class CosmosPredict2Pipeline(BasePipeline):
         else:
             return []
 
-    def save_adapter(self, save_dir, peft_state_dict):
-        self.peft_config.save_pretrained(save_dir)
-        # ComfyUI format.
-        peft_state_dict = {'diffusion_model.'+k: v for k, v in peft_state_dict.items()}
-        safetensors.torch.save_file(peft_state_dict, save_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
+    def save_adapter(self, save_dir, state_dict):
+        if any('.lokr_w' in k for k in state_dict):
+            safetensors.torch.save_file(state_dict, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
+        else:
+            self.peft_config.save_pretrained(save_dir)
+            state_dict = {'diffusion_model.'+k: v for k, v in state_dict.items()}
+            safetensors.torch.save_file(state_dict, save_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
 
     def save_model(self, save_dir, state_dict):
         state_dict = {'net.'+k: v for k, v in state_dict.items()}
