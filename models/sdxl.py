@@ -358,6 +358,7 @@ def apply_debiased_estimation(loss, timesteps, noise_scheduler, v_prediction=Fal
 class SDXLPipeline(BasePipeline):
     # Unique name, used to make the cache_dir path.
     name = 'sdxl'
+    pixels_round_to_multiple = 64
 
     # layers that will participate in activation checkpointing
     checkpointable_layers = [
