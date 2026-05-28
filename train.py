@@ -879,6 +879,17 @@ if __name__ == '__main__':
     epoch_loss = 0
     num_steps = 0
     empty_cuda_cache()
+    total_steps = config['max_steps'] if 'max_steps' in config else config['epochs'] * steps_per_epoch
+    if is_main_process():
+        pbar = tqdm(
+            total=total_steps,
+            initial=step - 1,
+            desc=f'Epoch {epoch}/{config["epochs"]}',
+            unit='step',
+            dynamic_ncols=True,
+        )
+    else:
+        pbar = None
     while True:
         model_engine.reset_activation_shape()
         iterator = get_data_iterator_for_step(train_dataloader, model_engine)
@@ -945,8 +956,12 @@ if __name__ == '__main__':
                 final_model_name = f'epoch{epoch}'
                 break
             epoch = new_epoch
+            if pbar is not None:
+                pbar.set_description(f'Epoch {epoch}/{config["epochs"]}')
 
         checkpointed, saved = saver.process_step(step, examples)
+        if pbar is not None:
+            pbar.update(1)
         if 'max_steps' in config and step >= config['max_steps']:
             final_model_name = f'step{step}'
             break
@@ -959,5 +974,7 @@ if __name__ == '__main__':
     if not saved:
         saver.save_model(final_model_name)
 
+    if pbar is not None:
+        pbar.close()
     if is_main_process():
         print('TRAINING COMPLETE!')
