@@ -102,6 +102,7 @@ def set_config_defaults(config):
     config.setdefault('warmup_steps', 0)
     if 'save_dtype' in config:
         config['save_dtype'] = DTYPE_MAP[config['save_dtype']]
+    config.setdefault('output_name', 'model')
 
     model_config = config['model']
     model_dtype_str = model_config['dtype']
@@ -885,7 +886,7 @@ if __name__ == '__main__':
 
     epoch = train_dataloader.epoch
     tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
-    saver = utils.saver.Saver(args, config, is_adapter, run_dir, model, train_dataloader, model_engine, pipeline_model)
+    saver = utils.saver.Saver(args, config, is_adapter, run_dir, model, train_dataloader, model_engine, pipeline_model, output_name=config['output_name'])
 
     disable_block_swap_for_eval = config.get('disable_block_swap_for_eval', False)
     if config['eval_before_first_step'] and not resume_from_checkpoint:

@@ -61,28 +61,13 @@ def _load_sample_cfg(sample_cfg_path: str | Path) -> SampleConfig:
 def _make_sample_out_dir(run_dir: str | Path, step: int | None, epoch: int | None) -> Path:
     root = Path(run_dir) / "samples"
     root.mkdir(parents=True, exist_ok=True)
-
-    if step is None and epoch is None:
-        name = "sample"
-    elif step is None:
-        name = f"epoch{epoch}"
-    elif epoch is None:
-        name = f"step{step}"
-    else:
-        name = f"step{step}_epoch{epoch}"
-
-    out_dir = root / name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir
+    return root
 
 
 def _gl_style_stem(step: int | None, idx: int) -> str:
-    """
-    naming includes the global step so you can correlate progress.
-    """
     if step is None:
         return f"sample_{idx:04d}"
-    return f"{int(step):08d}_{idx:04d}"
+    return f"sample_{int(step):08d}_{idx:04d}"
 
 
 def _should_sample(config: dict[str, Any], step: int, epoch: int, finished_epoch: bool) -> bool:
