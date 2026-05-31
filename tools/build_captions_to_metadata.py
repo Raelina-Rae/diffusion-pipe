@@ -1,30 +1,3 @@
-#!/usr/bin/env python3
-"""
-Build or merge captions.json for multi-caption diffusion-pipe training.
-
-Default (no tag dropout): 2 variants per image
-  1. full tags
-  2. first_n_tags + newline + nl_caption
-
-Optional tag-dropout variants (--dropout-variants N --tag-dropout 0.3):
-  Adds N extra captions alternating dropout+nl / nl+dropout (each with a new dropout draw).
-  Example: --dropout-variants 4 → 2 base + 4 dropout = 6 total.
-
-Example (same directory as images):
-  image_1.jpg
-  image_1.txt          # {tags}
-  image_1.caption      # {nl_caption}
-  image_1.txt8         # optional {first_n_tags}; omit to take first N tags from .txt
-
-Example runs:
-  python tools/build_captions_json.py --input D:/data/my_lora
-  python tools/build_captions_json.py --input D:/data/my_lora --base-variants tags
-  python tools/build_captions_json.py -i D:/data/my_lora --dropout-variants 2 --tag-dropout 0.3
-  python tools/build_captions_json.py -i D:/data/my_lora --dropout-variants 4 --tag-dropout 0.3
-
-See --help for all options.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -319,6 +292,11 @@ def main() -> int:
         help='Base RNG seed for tag dropout (default: deterministic hash per image).',
     )
 
+    parser.add_argument(
+        '--enable-random-caption', action='store_true',
+        help='Instead of training on all caption variants, randomly pick one caption per image per epoch. '
+             'A marker is stored in captions.json for the training script.',
+    )
     parser.add_argument('--include-videos', action='store_true', help='Include common video extensions.')
     parser.add_argument('--require-tags', action='store_true', default=True, help='Skip images without tags sidecar (default).')
     parser.add_argument('--no-require-tags', action='store_false', dest='require_tags')
@@ -386,13 +364,17 @@ def main() -> int:
     else:
         final = built
 
-    num_variants = {len(v) for v in final.values()}
+    caption_values = (v for k, v in final.items() if not k.startswith('__'))
+    num_variants = {len(v) for v in caption_values}
     print(f'Images processed: {len(built)}')
     print(f'Output keys: {len(final)}')
     if len(num_variants) == 1:
         print(f'Variants per image: {num_variants.pop()}')
     elif num_variants:
         print(f'Variants per image (mixed): {sorted(num_variants)} — prefer equal counts for diffusion-pipe')
+
+    if args.enable_random_caption:
+        final['__enable_random_caption__'] = True
 
     if warnings:
         print(f'Warnings ({len(warnings)}):')

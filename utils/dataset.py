@@ -215,6 +215,7 @@ class SizeBucketDataset:
         self.path = Path(self.directory_config['path'])
         self.cache_dir = cache_base / f'cache_{bucket_suffix(size_bucket)}'
         self.captions_dict = directory_dataset.captions_dict  # optional
+        self.enable_random_caption = directory_dataset.enable_random_caption
 
         if len(size_bucket) == 4:
             # rename old folder name to the new one for convenience
@@ -251,39 +252,50 @@ class SizeBucketDataset:
                 for i, image_spec in enumerate(self.metadata_dataset['image_spec'])
             }
 
-            equal_num_captions = True
-            num_captions = None
-            for example in self.metadata_dataset.select_columns(['caption']):
-                n = len(example['caption'])
-                if num_captions is not None and n != num_captions:
-                    equal_num_captions = False
-                    break
-                num_captions = n
-
-            if equal_num_captions:
-                # If all images have the same number of captions, set things up so we read (mostly) sequentially off disk. The metadata was already shuffled in the beginning.
-                iteration_order_by_caption_num = [[] for _ in range(num_captions)]
-                seed = 0
-                for example in self.metadata_dataset.select_columns(['image_spec', 'caption']):
-                    image_spec = example['image_spec']
-                    captions = example['caption']
-                    shuffle_with_seed(captions, seed)
-                    seed += 1
-                    latents_idx = image_spec_to_latents_idx[tuple(image_spec)]
-                    for i, caption in enumerate(captions):
-                        iteration_order_by_caption_num[i].append((image_spec, latents_idx, caption, i))
-                iteration_order_list = []
-                for l in iteration_order_by_caption_num:
-                    iteration_order_list.extend(l)
-            else:
+            if self.enable_random_caption:
+                # Random caption mode: each image appears once in the iteration order.
+                # A caption variant is randomly selected each time __getitem__ is called.
                 iteration_order_list = []
                 for example in self.metadata_dataset.select_columns(['image_spec', 'caption']):
                     image_spec = example['image_spec']
-                    captions = example['caption']
                     latents_idx = image_spec_to_latents_idx[tuple(image_spec)]
-                    for i, caption in enumerate(captions):
-                        iteration_order_list.append((image_spec, latents_idx, caption, i))
+                    # Use first caption as placeholder; actual caption is randomly picked in __getitem__.
+                    iteration_order_list.append((image_spec, latents_idx, example['caption'][0], 0))
                 shuffle_with_seed(iteration_order_list, 42)
+            else:
+                equal_num_captions = True
+                num_captions = None
+                for example in self.metadata_dataset.select_columns(['caption']):
+                    n = len(example['caption'])
+                    if num_captions is not None and n != num_captions:
+                        equal_num_captions = False
+                        break
+                    num_captions = n
+
+                if equal_num_captions:
+                    # If all images have the same number of captions, set things up so we read (mostly) sequentially off disk. The metadata was already shuffled in the beginning.
+                    iteration_order_by_caption_num = [[] for _ in range(num_captions)]
+                    seed = 0
+                    for example in self.metadata_dataset.select_columns(['image_spec', 'caption']):
+                        image_spec = example['image_spec']
+                        captions = example['caption']
+                        shuffle_with_seed(captions, seed)
+                        seed += 1
+                        latents_idx = image_spec_to_latents_idx[tuple(image_spec)]
+                        for i, caption in enumerate(captions):
+                            iteration_order_by_caption_num[i].append((image_spec, latents_idx, caption, i))
+                    iteration_order_list = []
+                    for l in iteration_order_by_caption_num:
+                        iteration_order_list.extend(l)
+                else:
+                    iteration_order_list = []
+                    for example in self.metadata_dataset.select_columns(['image_spec', 'caption']):
+                        image_spec = example['image_spec']
+                        captions = example['caption']
+                        latents_idx = image_spec_to_latents_idx[tuple(image_spec)]
+                        for i, caption in enumerate(captions):
+                            iteration_order_list.append((image_spec, latents_idx, caption, i))
+                    shuffle_with_seed(iteration_order_list, 42)
 
             iteration_order_dict = defaultdict(list)
             for image_spec, latents_idx, caption, caption_number in iteration_order_list:
@@ -314,20 +326,27 @@ class SizeBucketDataset:
         use_uncond = UNCOND_FRACTION > 0 and random.random() < UNCOND_FRACTION
         if use_uncond:
             caption = ''
+            caption_number = 0
         else:
             if self.captions_dict:
                 spec = entry['image_spec']
                 key = spec[-1]
                 if key in self.captions_dict:
-                    caption = self.captions_dict[key][entry['caption_number']]
+                    if self.enable_random_caption:
+                        caption_number = random.randrange(len(self.captions_dict[key]))
+                    else:
+                        caption_number = entry['caption_number']
+                    caption = self.captions_dict[key][caption_number]
                 else:
                     print(f'WARNING: image {key} did not have entry in captions_dict. Using empty caption.')
                     caption = ''
+                    caption_number = 0
             else:
+                caption_number = entry['caption_number']
                 caption = entry['caption']
 
         for ds, uncond_ds in zip(self.text_embedding_datasets, self.uncond_text_embeddings):
-            emb_dict = uncond_ds[0] if use_uncond else ds.get_text_embeddings(tuple(entry['image_spec']), entry['caption_number'])
+            emb_dict = uncond_ds[0] if use_uncond else ds.get_text_embeddings(tuple(entry['image_spec']), caption_number)
             ret.update(emb_dict)
         ret['caption'] = caption
         return ret
@@ -517,8 +536,10 @@ class DirectoryDataset:
             assert captions_json.exists()
             with open(captions_json) as f:
                 self.captions_dict = json.load(f)
+            self.enable_random_caption = self.captions_dict.pop('__enable_random_caption__', False)
         else:
             self.captions_dict = None
+            self.enable_random_caption = False
 
     def validate(self):
         resolutions = self.directory_config.get('resolutions', self.dataset_config.get('resolutions', []))
