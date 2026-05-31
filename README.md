@@ -1,4 +1,15 @@
-# diffusion-pipe
+# diffusion-pipe (custom fork)
+
+This is a customized fork of [diffusion-pipe](https://github.com/tdrussell/diffusion-pipe) with additional features and improvements for training Anima models.
+
+**Added features:**
+- **LoKr training** — Support for Kronecker-factored low-rank adaptation (LoKr)
+- **Sampling during training** — Generate sample outputs at intervals during training to monitor progress
+- **Multi-caption training pipeline** — `tools/build_captions_to_metadata.py` to build and merge captions from sidecar files into a unified `captions.json`
+- **Multi-level caption with random pick** — When multiple caption variants are available, randomly select one per image per epoch for varied training (configurable via `--enable-random-caption`)
+
+---
+
 A pipeline parallel training script for diffusion models.
 
 Models supported: SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2, OmniGen2, Flux Kontext, Wan2.2, Qwen-Image, Qwen-Image-Edit, HunyuanImage-2.1, AuraFlow, Z-Image, HunyuanVideo-1.5, Flux 2 (Dev and Klein), Anima, Ernie-Image, LTX 2.3.
