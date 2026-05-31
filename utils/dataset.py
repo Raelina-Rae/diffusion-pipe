@@ -704,8 +704,6 @@ class DirectoryDataset:
 
                 def add_captions(example):
                     tar_file, image_file = example['image_spec']
-                    if tar_file is None:
-                        image_file = image_file.split('/')[-1]
                     captions = caption_data.get(image_file, None)
                     if captions is None:
                         logger.warning(f'Image file {image_file} does not have an entry in captions.json')
