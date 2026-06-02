@@ -1,12 +1,12 @@
-# diffusion-pipe (custom fork)
+# Diffusion-pipe (custom fork)
 
 This is a customized fork of [diffusion-pipe](https://github.com/tdrussell/diffusion-pipe) with additional features and improvements for training Anima models.
 
 **Added features:**
 - **LoKr training** — Support for Kronecker-factored low-rank adaptation (LoKr)
 - **Sampling during training** — Generate sample outputs at intervals during training to monitor progress
-- **Multi-caption training pipeline** — `tools/build_captions_to_metadata.py` to build and merge captions from sidecar files into a unified `captions.json`
-- **Multi-level caption with random pick** — When multiple caption variants are available, randomly select one per image per epoch for varied training (configurable via `--enable-random-caption`)
+- **Multi-caption training pipeline** — `tools/build_captions_to_metadata.py` builds a `captions.json` with multiple caption variants per image (full tags, natural language, and tag-dropout variants).
+- **Multi-level caption with random pick** — When `captions.json` contains multiple variants per image, the training script picks one at random each cycle for varied conditioning. Requires `online_captions = true` in the dataset config (under the dataset directory or global config). Enable it via `build_captions_to_metadata.py --enable_random_caption`.
 
 ---
 

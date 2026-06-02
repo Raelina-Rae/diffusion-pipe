@@ -59,13 +59,13 @@ def _read_sidecar(path: Path) -> str | None:
     return path.read_text(encoding='utf-8-sig').strip() or None
 
 
-def _per_image_rng(stem: str, base_seed: int | None, pair_index: int) -> random.Random:
-    """Deterministic RNG scoped to one image + one dropout pair."""
+def _per_image_rng(stem: str, base_seed: int | None, slot_index: int) -> random.Random:
+    """Deterministic RNG scoped to one image + one dropout slot."""
     if base_seed is None:
-        seed = int(hashlib.md5(f'{stem}:{pair_index}'.encode()).hexdigest(), 16) % (2 ** 32)
+        seed = int(hashlib.md5(f'{stem}:{slot_index}'.encode()).hexdigest(), 16) % (2 ** 32)
     else:
         offset = int(hashlib.md5(stem.encode()).hexdigest(), 16) % 100_000
-        seed = base_seed + offset * 100 + pair_index
+        seed = base_seed + offset * 100 + slot_index
     return random.Random(seed)
 
 
@@ -78,7 +78,7 @@ def _apply_dropout(
 ) -> tuple[list[str], list[str]]:
     """Split tags into (protected, kept_remainder) after applying dropout.
 
-    - The first ``protect_n`` tags are always kept (protected).
+    - The first ``protected_n_tags`` tags are always kept (protected).
     - Each remaining tag is kept with probability ``1 - rate``.
     Returns two lists so callers can compose the final caption string freely.
     """
@@ -120,10 +120,10 @@ def _build_variants(
     tags: str,
     nl: str | None,
     first_n_tags: str | None,
-    first_n: int,
+    first_n_count: int,
     delimiter: str,
     dropout_rate: float,
-    protect_first_n: int,
+    protected_n_tags: int,
     num_dropout: int,
     stem: str,
     dropout_seed: int | None,
@@ -134,36 +134,35 @@ def _build_variants(
     if tags:
         variants.append(tags)
 
-    # --- Base caption 1: first_n_tags + NL ---
+    # --- Base caption 1: first_n_tags + NL, or just NL ---
     if nl:
-        fn = first_n_tags if first_n_tags is not None else _first_n_from_tags(tags, first_n, delimiter)
+        fn = None
+        if first_n_tags is not None:
+            fn = first_n_tags
+        elif first_n_count > 0:
+            fn = _first_n_from_tags(tags, first_n_count, delimiter)
         if fn:
             variants.append(f'{fn}.\n{nl}')
+        else:
+            variants.append(nl)
 
     # --- Dropout captions ---
     if num_dropout <= 0 or not tags or not nl:
         return variants
 
-    slots_remaining = num_dropout
-    pair_index = 0
-
-    while slots_remaining > 0:
-        rng = _per_image_rng(stem, dropout_seed, pair_index)
-        protected, kept_remainder = _apply_dropout(tags, dropout_rate, protect_first_n, delimiter, rng)
+    for slot_idx in range(num_dropout):
+        rng = _per_image_rng(stem, dropout_seed, slot_idx)
+        protected, kept_remainder = _apply_dropout(tags, dropout_rate, protected_n_tags, delimiter, rng)
         all_kept = protected + kept_remainder
         kept_str = _join_tags(all_kept, delimiter)
 
-        # Slot A: tags-first
-        if slots_remaining > 0 and kept_str:
-            variants.append(f'{kept_str}.\n{nl}')
-            slots_remaining -= 1
+        if not kept_str:
+            continue
 
-        # Slot B: nl-first (same mask → same kept_str)
-        if slots_remaining > 0 and kept_str:
-            variants.append(f'{nl}\n{kept_str}')
-            slots_remaining -= 1
-
-        pair_index += 1
+        if slot_idx % 2 == 0:
+            variants.append(f'{kept_str}.\n{nl}')   # tags-first
+        else:
+            variants.append(f'{nl}\n{kept_str}')   # nl-first
 
     return variants
 
@@ -177,11 +176,11 @@ def build_captions_for_directory(
     sidecar_dir: Path | None,
     tags_ext: str,
     nl_ext: str,
-    first_n_ext: str | None,
-    first_n: int,
+    first_n_tags_ext: str | None,
+    first_n_tags_count: int,
     delimiter: str,
     dropout_rate: float,
-    protect_first_n: int,
+    protected_n_tags: int,
     num_dropout: int,
     dropout_seed: int | None,
     include_videos: bool,
@@ -191,13 +190,13 @@ def build_captions_for_directory(
 
     tags_ext  = _norm_ext(tags_ext)
     nl_ext    = _norm_ext(nl_ext)
-    if first_n_ext:
-        first_n_ext = _norm_ext(first_n_ext)
+    if first_n_tags_ext:
+        first_n_tags_ext = _norm_ext(first_n_tags_ext)
 
     # Sidecar extensions should not be treated as media files
     sidecar_suffixes = {tags_ext, nl_ext}
-    if first_n_ext:
-        sidecar_suffixes.add(first_n_ext)
+    if first_n_tags_ext:
+        sidecar_suffixes.add(first_n_tags_ext)
 
     caption_root = sidecar_dir if sidecar_dir is not None else root
     media_files  = _collect_media_files(root, include_videos, sidecar_suffixes)
@@ -215,7 +214,7 @@ def build_captions_for_directory(
         base = caption_root / stem
         tags       = _read_sidecar(base.with_suffix(tags_ext))
         nl         = _read_sidecar(base.with_suffix(nl_ext))
-        first_n_tags = _read_sidecar(base.with_suffix(first_n_ext)) if first_n_ext else None
+        prebuilt_first_n_tags = _read_sidecar(base.with_suffix(first_n_tags_ext)) if first_n_tags_ext else None
 
         if require_tags and not tags:
             warnings.append(f'{key}: missing tags sidecar (*{tags_ext})')
@@ -230,11 +229,11 @@ def build_captions_for_directory(
         variants = _build_variants(
             tags=tags or '',
             nl=nl,
-            first_n_tags=first_n_tags,
-            first_n=first_n,
+            first_n_tags=prebuilt_first_n_tags,
+            first_n_count=first_n_tags_count,
             delimiter=delimiter,
             dropout_rate=dropout_rate,
-            protect_first_n=protect_first_n,
+            protected_n_tags=protected_n_tags,
             num_dropout=num_dropout,
             stem=stem,
             dropout_seed=dropout_seed,
@@ -263,54 +262,55 @@ def main() -> int:
     # --- Paths ---
     parser.add_argument('--input', '-i', type=Path, required=True,
         help='Dataset directory containing images/videos.')
-    parser.add_argument('--sidecar-dir', type=Path, default=None,
+    parser.add_argument('--sidecar_dir', type=Path, default=None,
         help='Directory with caption sidecars (default: same as --input).')
     parser.add_argument('--output', '-o', type=Path, default=None,
         help='Output path for captions.json (default: <input>/captions.json).')
     parser.add_argument('--merge', action='store_true',
         help='Merge into existing captions.json instead of overwriting.')
-    parser.add_argument('--dry-run', action='store_true',
+    parser.add_argument('--dry_run', action='store_true',
         help='Print summary and sample output without writing any file.')
 
     # --- Sidecar extensions ---
-    parser.add_argument('--tags-ext', default='.txt',
+    parser.add_argument('--tags_ext', default='.txt',
         help='Extension for full tag captions (default: .txt).')
-    parser.add_argument('--nl-ext', default='.caption',
+    parser.add_argument('--nl_ext', default='.caption',
         help='Extension for natural-language captions (default: .caption).')
-    parser.add_argument('--first-n-ext', default=None, metavar='EXT',
+    parser.add_argument('--first_n_tags_ext', default=None, metavar='EXT',
         help='Extension for pre-built first-N tag file (e.g. .txtf). '
-             'If omitted, first-N tags are derived from --tags-ext using --first-n.')
+             'If omitted, first-N tags are derived from --tags_ext using --first_n_tags.')
 
     # --- first-N options ---
-    parser.add_argument('--first-n', type=int, default=8,
+    parser.add_argument('--first_n_tags', type=int, default=0,
         help='Number of leading tags to use in the first_n_tags base caption '
-             'when --first-n-ext is not provided (default: 8).')
+             'when --first_n_tags_ext is not provided (default: 0 = disabled).')
 
     # --- Tag delimiter ---
     parser.add_argument('--delimiter', default=', ',
         help='Tag delimiter used for splitting and joining (default: ", ").')
 
     # --- Dropout options ---
-    parser.add_argument('--num-dropout', type=int, default=0, metavar='N',
+    parser.add_argument('--num_dropout', type=int, default=0, metavar='N',
         help='Number of additional dropout caption slots to generate (default: 0 = disabled). '
-             'Slots are added in pairs: [tags-first, nl-first] sharing the same dropout mask.')
-    parser.add_argument('--dropout-rate', type=float, default=0.3, metavar='RATE',
+             'Each slot uses an independent dropout mask applied to tags. '
+             'Slot order: tags-first, nl-first, tags-first, nl-first, ...')
+    parser.add_argument('--dropout_rate', type=float, default=0.3, metavar='RATE',
         help='Per-tag dropout probability applied to tags after the protected prefix (default: 0.3). '
-             'Ignored when --num-dropout is 0.')
-    parser.add_argument('--protect-first-n', type=int, default=8,
+             'Ignored when --num_dropout is 0.')
+    parser.add_argument('--protected_n_tags', type=int, default=8,
         help='Number of leading tags that are never dropped during dropout (default: 8).')
-    parser.add_argument('--dropout-seed', type=int, default=None,
+    parser.add_argument('--dropout_seed', type=int, default=None,
         help='Base RNG seed for deterministic dropout (default: hash-based per image).')
 
     # --- Misc ---
-    parser.add_argument('--enable-random-caption', action='store_true',
+    parser.add_argument('--enable_random_caption', action='store_true',
         help='Add __enable_random_caption__ marker to captions.json for the training script.')
-    parser.add_argument('--include-videos', action='store_true',
+    parser.add_argument('--include_videos', action='store_true',
         help='Include common video file extensions alongside images.')
-    parser.add_argument('--require-tags', action='store_true', default=True,
+    parser.add_argument('--require_tags', action='store_true', default=True,
         help='Skip images without a tags sidecar (default: on).')
-    parser.add_argument('--no-require-tags', action='store_false', dest='require_tags')
-    parser.add_argument('--require-nl', action='store_true',
+    parser.add_argument('--no_require_tags', action='store_false', dest='require_tags')
+    parser.add_argument('--require_nl', action='store_true',
         help='Skip images without a nl sidecar.')
     parser.add_argument('--indent', type=int, default=2,
         help='JSON indentation level (default: 2). Use 0 for compact output.')
@@ -322,16 +322,16 @@ def main() -> int:
         print(f'Error: --input is not a directory: {args.input}', file=sys.stderr)
         return 1
     if args.sidecar_dir is not None and not args.sidecar_dir.is_dir():
-        print(f'Error: --sidecar-dir is not a directory: {args.sidecar_dir}', file=sys.stderr)
+        print(f'Error: --sidecar_dir is not a directory: {args.sidecar_dir}', file=sys.stderr)
         return 1
     if not (0.0 <= args.dropout_rate <= 1.0):
-        print('Error: --dropout-rate must be between 0.0 and 1.0', file=sys.stderr)
+        print('Error: --dropout_rate must be between 0.0 and 1.0', file=sys.stderr)
         return 1
     if args.num_dropout < 0:
-        print('Error: --num-dropout must be >= 0', file=sys.stderr)
+        print('Error: --num_dropout must be >= 0', file=sys.stderr)
         return 1
     if args.num_dropout > 0 and args.dropout_rate <= 0.0:
-        print('Error: --dropout-rate must be > 0 when --num-dropout > 0', file=sys.stderr)
+        print('Error: --dropout_rate must be > 0 when --num_dropout > 0', file=sys.stderr)
         return 1
 
     output = args.output or (args.input / 'captions.json')
@@ -342,11 +342,11 @@ def main() -> int:
         sidecar_dir=args.sidecar_dir,
         tags_ext=args.tags_ext,
         nl_ext=args.nl_ext,
-        first_n_ext=args.first_n_ext,
-        first_n=args.first_n,
+        first_n_tags_ext=args.first_n_tags_ext,
+        first_n_tags_count=args.first_n_tags,
         delimiter=args.delimiter,
         dropout_rate=args.dropout_rate,
-        protect_first_n=args.protect_first_n,
+        protected_n_tags=args.protected_n_tags,
         num_dropout=args.num_dropout,
         dropout_seed=args.dropout_seed,
         include_videos=args.include_videos,
@@ -374,10 +374,9 @@ def main() -> int:
     print(f'  [1] {{first_n_tags}}.\\n{{nl_caption}}')
     for i in range(args.num_dropout):
         slot = base_slots + i
-        pair = i // 2 + 1
-        kind = 'tags-first' if i % 2 == 0 else 'nl-first '
-        print(f'  [{slot}] dropout pair {pair} — {kind}')
-    print(f'  Total slots: {total_slots}  (dropout rate: {args.dropout_rate}, protect first: {args.protect_first_n})\n')
+        kind = 'tags-first' if i % 2 == 0 else 'nl-first'
+        print(f'  [{slot}] dropout — {kind}')
+    print(f'  Total slots: {total_slots}  (dropout rate: {args.dropout_rate}, protected: {args.protected_n_tags})\n')
 
     data_keys   = [k for k in final if not k.startswith('__')]
     variant_counts = {len(final[k]) for k in data_keys}
