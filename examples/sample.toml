@@ -1,0 +1,13 @@
+width = 1024
+height = 1024
+num_inference_steps = 32
+guidance_scale = 4
+seed = 24
+[[prompts]]
+prompt = "masterpiece, best quality, score_7, absurdres, 1girl, solo, black hair, looking at viewer, mole under eye, earrings, bangs, mole, blunt bangs, long hair, plant, closed mouth, upper body, grey eyes"
+negative_prompt = "worst quality, low quality, score_1, score_2, score_3, artist name"
+
+[[prompts]]
+prompt = "masterpiece, best quality, score_7, absurdres, 1girl, solo, brown hair, hood, hoodie, smile, choker, looking at viewer, medium hair, brown eyes, black choker, hair between eyes, swept bangs, jewelry, red hoodie, hood down, long sleeves, pink hoodie, cowboy shot, shorts, hand in pocket"
+negative_prompt = "worst quality, low quality, score_1, score_2, score_3, artist name"
+

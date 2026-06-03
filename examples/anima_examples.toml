@@ -1,0 +1,85 @@
+# trained using diffusion-pipe
+
+output_dir = '/outputs/anima-test'
+
+dataset = '/examples/dataset.toml'
+eval_datasets = [
+    {name = 'eval_train', config = 'path/to/eval_dataset.toml'},
+]
+
+# training settings
+epochs = 10
+micro_batch_size_per_gpu = 1
+pipeline_stages = 1
+gradient_accumulation_steps = 1
+gradient_clipping = 1
+warmup_steps = 25
+
+# eval settings
+eval_every_n_epochs = 1
+# eval_every_n_steps = 500
+# eval_every_n_examples = 5000
+eval_before_first_step = true
+eval_micro_batch_size_per_gpu = 1
+eval_gradient_accumulation_steps = 1
+
+# sample settings
+sample = '/examples/sample.toml'
+# sample_every_n_steps = 25
+sample_every_n_epochs = 1
+sample_at_first = true
+
+# misc settings
+output_name = 'anima-test'
+save_every_n_epochs = 1
+# save_every_n_steps = 1000
+# save_every_n_examples = 4096000
+# checkpoint_every_n_epochs = 1
+# checkpoint_every_n_minutes = 120
+activation_checkpointing = true
+# reentrant_activation_checkpointing = true
+
+partition_method = 'parameters'
+# partition_method = 'manual'
+# partition_split = [10]
+
+save_dtype = 'bfloat16'
+caching_batch_size = 8
+map_num_proc = 8
+steps_per_print = 1
+compile = true
+
+[model]
+type = 'anima'
+transformer_path = '/models/circlestone-labs__Anima/split_files/diffusion_models/anima-base-v1.0.safetensors'
+vae_path = '/vae/circlestone-labs__Anima/split_files/vae/qwen_image_vae.safetensors'
+llm_path = '/tenc/circlestone-labs__Anima/split_files/text_encoders/qwen_3_06b_base.safetensors'
+dtype = 'bfloat16'
+llm_adapter_lr = 0
+# timestep_sample_method = 'uniform'
+# flux_shift = true
+# multiscale_loss_weight = 0.5
+sigmoid_scale = 1.0
+
+# For full fine tuning, simply delete or comment out the [adapter] table to FFT.
+[adapter]
+type = 'lokr'
+rank = 8
+dtype = 'bfloat16'
+factor = 8
+preset = 'full'
+full_matrix = true
+
+[optimizer]
+type = 'adamw_optimi'
+lr = 2e-05
+betas = [0.9, 0.99]
+weight_decay = 0.01
+eps = 1e-8
+
+[monitoring]
+# Set to true and fill in these fields to enable wandb
+enable_wandb = false
+wandb_api_key = ''
+wandb_tracker_name = ''
+wandb_run_name = ''

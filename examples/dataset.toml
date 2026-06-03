@@ -5,7 +5,7 @@
 # as many times as the length of this list.
 # If you just want to use predetermined (width, height, frames) size buckets, see the example cosmos_dataset.toml
 # file for how you can do that.
-resolutions = [512]
+resolutions = [1024]
 
 # You can give resolutions as (width, height) pairs also. This doesn't do anything different, it's just
 # another way of specifying the area(s) (i.e. total number of pixels) you want to train on.
@@ -45,6 +45,9 @@ frame_buckets = [1, 33]
 
 # Controls whether to skip images with missing captions (true, the default if unset), or use an empty caption (false).
 #skip_empty_caption = false
+
+# Use 'captions.json' instead of '.txt' files for captions. The 'captions.json' file must be placed in the same directory as the image files
+# online_captions = true
 
 [[directory]]
 # Path to directory of images/videos, and corresponding caption files. The caption files should match the media file name, but with a .txt extension.

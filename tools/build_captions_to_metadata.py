@@ -277,7 +277,7 @@ def main() -> int:
     parser.add_argument('--nl_ext', default='.caption',
         help='Extension for natural-language captions (default: .caption).')
     parser.add_argument('--first_n_tags_ext', default=None, metavar='EXT',
-        help='Extension for pre-built first-N tag file (e.g. .txtf). '
+        help='Extension for pre-built first-N tag file (e.g. .tag). '
              'If omitted, first-N tags are derived from --tags_ext using --first_n_tags.')
 
     # --- first-N options ---
