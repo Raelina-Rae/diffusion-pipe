@@ -3,9 +3,9 @@
 output_dir = '/outputs/anima-test'
 
 dataset = '/examples/dataset.toml'
-eval_datasets = [
-    {name = 'eval_train', config = 'path/to/eval_dataset.toml'},
-]
+#eval_datasets = [
+#    {name = 'eval_train', config = 'path/to/eval_dataset.toml'},
+#]
 
 # training settings
 epochs = 10
@@ -44,7 +44,7 @@ partition_method = 'parameters'
 # partition_split = [10]
 
 save_dtype = 'bfloat16'
-caching_batch_size = 8
+caching_batch_size = 1
 map_num_proc = 8
 steps_per_print = 1
 compile = true

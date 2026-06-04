@@ -261,10 +261,13 @@ class CosmosPredict2Pipeline(BasePipeline):
         transformer_dtype = self.model_config.get('transformer_dtype', dtype)
 
         state_dict = load_state_dict(self.model_config['transformer_path'])
-        # Remove 'net.' prefix
         new_state_dict = {}
         for k, v in state_dict.items():
-            if k.startswith('net.'):
+            if k.startswith('model.diffusion_model.'):
+                k = k[len('model.diffusion_model.'):]
+            elif k.startswith('diffusion_model.'):
+                k = k[len('diffusion_model.'):]
+            elif k.startswith('net.'):
                 k = k[len('net.'):]
             new_state_dict[k] = v
         state_dict = new_state_dict
@@ -322,7 +325,7 @@ class CosmosPredict2Pipeline(BasePipeline):
             safetensors.torch.save_file(state_dict, save_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
 
     def save_model(self, save_dir, state_dict):
-        state_dict = {'net.'+k: v for k, v in state_dict.items()}
+        state_dict = {'net.' + k: v for k, v in state_dict.items()}
         safetensors.torch.save_file(state_dict, save_dir / 'model.safetensors', metadata={'format': 'pt'})
 
     def get_preprocess_media_file_fn(self):
