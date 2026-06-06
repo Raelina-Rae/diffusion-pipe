@@ -227,7 +227,8 @@ def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path, 
     pipe.text_encoder.eval()
     pipe.text_encoder_2.eval()
 
-    # Set the inference scheduler.
+    # Set the inference scheduler (temporarily).
+    orig_scheduler = pipe.scheduler
     pipe.scheduler = _get_sdxl_scheduler(pipe, sample_cfg.sampler)
 
     generator = torch.Generator(device=device)
@@ -254,6 +255,8 @@ def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path, 
             saved.append((out_path, f"{p.prompt}\nNEG: {p.negative_prompt}".strip()))
             img_idx += 1
 
+    # Restore the original training scheduler.
+    pipe.scheduler = orig_scheduler
     if was_training:
         pipe.unet.train()
         pipe.text_encoder.train()
