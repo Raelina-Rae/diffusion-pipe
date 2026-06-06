@@ -81,10 +81,15 @@ def seed_from_hash(item):
     return int(hashlib.md5(str.encode(str(item))).hexdigest(), 16) % int(1e9)
 
 
-def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerprint_args=None, regenerate_cache=False, caching_batch_size=1):
-    new_fingerprint_args = [] if new_fingerprint_args is None else new_fingerprint_args
-    new_fingerprint_args.append(dataset._fingerprint)
-    new_fingerprint = Hasher.hash(new_fingerprint_args)
+def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerprint_args=None, regenerate_cache=False, caching_batch_size=1, extra_fingerprint_args=None, force_fingerprint=None):
+    if force_fingerprint is not None:
+        new_fingerprint = force_fingerprint
+    else:
+        new_fingerprint_args = [] if new_fingerprint_args is None else new_fingerprint_args
+        if extra_fingerprint_args is not None:
+            new_fingerprint_args.extend(extra_fingerprint_args)
+        new_fingerprint_args.append(dataset._fingerprint)
+        new_fingerprint = Hasher.hash(new_fingerprint_args)
     if cache_file_prefix:
         cache_dir = cache_dir / cache_file_prefix.strip('_')
 
@@ -205,6 +210,9 @@ def _cache_text_embeddings(metadata_dataset, map_fn, i, cache_dir, regenerate_ca
 # and captions on disk. Not batched; returns individual items.
 class SizeBucketDataset:
     def __init__(self, metadata_dataset, directory_config, size_bucket, cache_base, directory_dataset):
+        # Save the pre-shuffle fingerprint so the latents cache key is stable across
+        # the caching (child process) and reload (parent process) phases.
+        self.metadata_fingerprint = metadata_dataset._fingerprint
         # Shuffle deterministically based on size bucket, so that two resolutions of the same aspect ratio get different
         # orders, which mixes data better when training on multiple resolutions at once.
         seed = seed_from_hash(size_bucket)
@@ -233,15 +241,38 @@ class SizeBucketDataset:
 
     def cache_latents(self, map_fn, regenerate_cache=False, trust_cache=False, caching_batch_size=1):
         print(f'caching latents: {self.size_bucket}')
+        # Use a cache key that depends on the image source (directory + size bucket + count)
+        # but NOT on the metadata fingerprint, so that shuffle_tags/cache_shuffle_num caption
+        # changes don't invalidate the latents cache.
+        cache_key_data = f'{self.path}:{self.size_bucket}:{len(self.metadata_dataset)}'
+        cache_fingerprint = hashlib.md5(cache_key_data.encode()).hexdigest()
         self.latent_dataset = _map_and_cache(
             self.metadata_dataset,
             map_fn,
             self.cache_dir,
             cache_file_prefix='latents_',
+            force_fingerprint=cache_fingerprint,
             regenerate_cache=regenerate_cache,
             caching_batch_size=caching_batch_size,
         )
-        assert len(self.latent_dataset) == len(self.metadata_dataset)
+        latent_len = len(self.latent_dataset)
+        meta_len = len(self.metadata_dataset)
+        if latent_len != meta_len:
+            msg = (
+                f'Latent cache size mismatch for bucket {self.size_bucket}: '
+                f'cache has {latent_len} items, metadata has {meta_len} items. '
+                f'Cache key: {cache_key_data} => {cache_fingerprint}. '
+                f'Cache fingerprint: {self.latent_dataset.fingerprint if hasattr(self.latent_dataset, "fingerprint") else "N/A"}.'
+            )
+            if map_fn is not None:
+                # Caching phase: some rows produced 0 latents (e.g. broken media files).
+                print(f'ERROR: {msg}')
+                print('Run with --regenerate_cache to rebuild from scratch.')
+                raise AssertionError(msg)
+            else:
+                # Reload phase: latent count doesn't match metadata.
+                print(f'WARNING: {msg}')
+                raise AssertionError(msg)
 
         iteration_order_cache_dir = self.cache_dir / 'iteration_order'
 
@@ -1083,7 +1114,6 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         first_size_bucket = example['size_bucket'][0]
         tensors_and_masks = []
         image_specs = []
-        captions = []
         control_tensors_and_masks = []
         for i, (image_spec, mask_path, size_bucket, caption) in enumerate(
             zip(example['image_spec'], example['mask_file'], example['size_bucket'], example['caption'])
@@ -1092,7 +1122,6 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
             items = preprocess_media_file_fn(image_spec, mask_path, size_bucket)
             tensors_and_masks.extend(items)
             image_specs.extend([image_spec] * len(items))
-            captions.extend([caption] * len(items))
             if is_edit_dataset:
                 control_file = example['control_file'][i]
                 control_items = preprocess_media_file_fn((None, control_file), None, size_bucket)
@@ -1104,7 +1133,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
 
         if len(tensors_and_masks) == 0:
             assert not is_edit_dataset
-            return {'latents': [], 'mask': [], 'image_spec': [], 'caption': []}
+            return {'latents': [], 'mask': [], 'image_spec': []}
 
         caching_batch_size = len(example['image_spec'])
         results = defaultdict(list)
@@ -1123,7 +1152,6 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
             results[k] = torch.cat(v)
         results['image_spec'] = image_specs
         results['mask'] = [t[1] for t in tensors_and_masks]
-        results['caption'] = captions
         return results
 
     for ds in datasets:

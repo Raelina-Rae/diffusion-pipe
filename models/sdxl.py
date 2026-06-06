@@ -855,6 +855,7 @@ class DownBlockInnerLayer(nn.Module):
         self.attn = attn
         self.append_residual_hidden_states = append_residual_hidden_states
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         hidden_states, timesteps, emb, encoder_hidden_states, *res_hidden_states, forward_upsample_size = inputs
@@ -871,6 +872,7 @@ class MidBlockInnerLayer(nn.Module):
         self.resnet = resnet
         self.attn = attn
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         hidden_states, timesteps, emb, encoder_hidden_states, *res_hidden_states, forward_upsample_size = inputs
@@ -886,6 +888,7 @@ class UpBlockInnerLayer(nn.Module):
         self.resnet = resnet
         self.attn = attn
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         hidden_states, timesteps, emb, encoder_hidden_states, *res_hidden_states, forward_upsample_size = inputs
@@ -903,6 +906,7 @@ class DownsamplerLayer(nn.Module):
         super().__init__()
         self.downsamplers = downsamplers
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         hidden_states, timesteps, emb, encoder_hidden_states, *res_hidden_states, forward_upsample_size = inputs
@@ -918,6 +922,7 @@ class UpsamplerLayer(nn.Module):
         self.upsamplers = upsamplers
         self.is_final_block = is_final_block
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         hidden_states, timesteps, emb, encoder_hidden_states, *res_hidden_states, forward_upsample_size = inputs
@@ -935,6 +940,7 @@ class UnetDownBlockLayer(nn.Module):
         super().__init__()
         self.block = block
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         sample, timesteps, emb, encoder_hidden_states, *down_block_res_samples, forward_upsample_size = inputs
@@ -967,6 +973,7 @@ class UnetMidBlockLayer(nn.Module):
         super().__init__()
         self.block = block
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         sample, timesteps, emb, encoder_hidden_states, *down_block_res_samples, forward_upsample_size = inputs
@@ -998,6 +1005,7 @@ class UnetUpBlockLayer(nn.Module):
         self.block = block
         self.is_final_block = is_final_block
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         sample, timesteps, emb, encoder_hidden_states, *down_block_res_samples, forward_upsample_size = inputs
@@ -1049,6 +1057,7 @@ class FinalLayer(nn.Module):
         self.conv_act = unet.conv_act
         self.conv_out = unet.conv_out
 
+    @torch.compiler.disable
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         sample, timesteps, emb, encoder_hidden_states, *down_block_res_samples, forward_upsample_size = inputs

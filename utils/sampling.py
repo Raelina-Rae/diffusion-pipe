@@ -30,6 +30,7 @@ class SampleConfig:
     guidance_scale: float
     batch_size: int
     seed: int | None
+    sampler: str
     prompts: list[SamplePrompt]
 
 
@@ -54,6 +55,7 @@ def _load_sample_cfg(sample_cfg_path: str | Path) -> SampleConfig:
         guidance_scale=float(raw.get("guidance_scale", raw.get("cfg", 5.0))),
         batch_size=int(raw.get("batch_size", 1)),
         seed=(int(raw["seed"]) if "seed" in raw and raw["seed"] is not None else None),
+        sampler=str(raw.get("sampler", "euler")).lower(),
         prompts=prompts,
     )
 
@@ -155,6 +157,58 @@ def maybe_sample_during_training(
     return saved
 
 
+def _get_sdxl_scheduler(pipe: Any, sampler: str) -> Any:
+    """Create an inference scheduler for SDXL matching the training noise schedule."""
+    import diffusers
+    beta_start = 0.00085
+    beta_end = 0.012
+    beta_schedule = "scaled_linear"
+
+    samplers = {
+        "ddpm": lambda: diffusers.DDPMScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000, clip_sample=False,
+        ),
+        "euler": lambda: diffusers.EulerDiscreteScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000,
+        ),
+        "ddim": lambda: diffusers.DDIMScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000, clip_sample=False,
+        ),
+        "dpmpp_2m": lambda: diffusers.DPMSolverMultistepScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000, use_karras_sigmas=False,
+        ),
+        "dpmpp_2m_karras": lambda: diffusers.DPMSolverMultistepScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000, use_karras_sigmas=True,
+        ),
+        "dpmpp_sde": lambda: diffusers.DPMSolverSinglestepScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000,
+        ),
+        "pndm": lambda: diffusers.PNDMScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000,
+        ),
+        "lms": lambda: diffusers.LMSDiscreteScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000,
+        ),
+        "heun": lambda: diffusers.HeunDiscreteScheduler(
+            beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
+            num_train_timesteps=1000,
+        ),
+    }
+    factory = samplers.get(sampler)
+    if factory is None:
+        logger.warning(f"Unknown sampler '{sampler}', falling back to 'euler'.")
+        factory = samplers["euler"]
+    return factory()
+
+
 def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path, step: int | None) -> list[tuple[Path, str]]:
     """
     Uses the in-memory Diffusers SDXL pipeline held by `models/sdxl.py`.
@@ -172,6 +226,9 @@ def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path, 
     pipe.unet.eval()
     pipe.text_encoder.eval()
     pipe.text_encoder_2.eval()
+
+    # Set the inference scheduler.
+    pipe.scheduler = _get_sdxl_scheduler(pipe, sample_cfg.sampler)
 
     generator = torch.Generator(device=device)
     if sample_cfg.seed is not None:
