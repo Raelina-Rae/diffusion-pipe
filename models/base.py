@@ -18,7 +18,7 @@ from torchvision import transforms
 import imageio
 
 from utils.common import is_main_process, VIDEO_EXTENSIONS, round_to_nearest_multiple, round_down_to_multiple
-from utils.lokr import LoKrModule, apply_lokr_to_model, get_lokr_state_dict, load_lokr_state_dict
+from utils.lokr import LoKrModule, apply_lokr_to_model, get_lokr_state_dict, load_lokr_state_dict, convert_lokr_state_dict_to_lycoris
 import comfy.utils
 import comfy.sd
 import comfy.sd1_clip
@@ -178,6 +178,7 @@ class BasePipeline:
         raise NotImplementedError()
 
     def configure_adapter(self, adapter_config):
+        self.adapter_config = adapter_config
         adapter_type = adapter_config['type']
         if adapter_type == 'lora':
             target_linear_modules = set()
@@ -218,7 +219,14 @@ class BasePipeline:
 
     def save_adapter(self, save_dir, state_dict):
         if any('.lokr_w' in k for k in state_dict):
-            safetensors.torch.save_file(state_dict, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
+            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict)
+            meta = {
+                'format': 'pt',
+                'ss_network_module': 'lycoris.modules.lokr',
+                'ss_network_dim': str(self.adapter_config['rank']),
+                'ss_network_alpha': str(self.adapter_config['alpha']),
+            }
+            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata=meta)
             return
         raise NotImplementedError()
 
@@ -480,6 +488,7 @@ class ComfyPipeline:
         return self.text_encoders
 
     def configure_adapter(self, adapter_config):
+        self.adapter_config = adapter_config
         adapter_type = adapter_config['type']
         if adapter_type == 'lora':
             target_linear_modules = set()
@@ -520,7 +529,14 @@ class ComfyPipeline:
 
     def save_adapter(self, save_dir, sd):
         if any('.lokr_w' in k for k in sd):
-            safetensors.torch.save_file(sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
+            lycoris_sd = convert_lokr_state_dict_to_lycoris(sd)
+            meta = {
+                'format': 'pt',
+                'ss_network_module': 'lycoris.modules.lokr',
+                'ss_network_dim': str(self.adapter_config['rank']),
+                'ss_network_alpha': str(self.adapter_config['alpha']),
+            }
+            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata=meta)
         else:
             self.peft_config.save_pretrained(save_dir)
             sd = {'diffusion_model.'+k: v for k, v in sd.items()}

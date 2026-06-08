@@ -12,7 +12,7 @@ from safetensors.torch import save_file
 
 from models.base import BasePipeline, make_contiguous
 from utils.common import AUTOCAST_DTYPE, is_main_process
-from utils.lokr import LoKrModule, apply_lokr_to_model, get_lokr_state_dict, load_lokr_state_dict
+from utils.lokr import LoKrModule, apply_lokr_to_model, get_lokr_state_dict, load_lokr_state_dict, convert_lokr_state_dict_to_lycoris
 
 
 
@@ -519,7 +519,16 @@ class SDXLPipeline(BasePipeline):
             kohya_sd = diffusers.utils.state_dict_utils.convert_state_dict_to_kohya(state_dict)
             safetensors.torch.save_file(kohya_sd, save_dir / 'lora.safetensors', metadata={'format': 'pt'})
         elif adapter_type == 'lokr':
-            safetensors.torch.save_file(state_dict, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
+            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict)
+            meta = {
+                'format': 'pt',
+                'ss_network_module': 'lycoris.modules.lokr',
+                'ss_network_dim': str(self.config['adapter']['rank']),
+                'ss_network_alpha': str(self.config['adapter']['alpha']),
+            }
+            if 'factor' in self.config['adapter']:
+                meta['ss_network_args'] = str({'factor': self.config['adapter']['factor']})
+            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata=meta)
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 

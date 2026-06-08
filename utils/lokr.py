@@ -1,5 +1,4 @@
 import math
-import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -326,15 +325,104 @@ def get_lokr_state_dict(model):
 
 
 def load_lokr_state_dict(model, state_dict):
-    """Load LoKr state dict into a model, handling various prefix formats."""
+    """Load LoKr state dict into a model, handling various prefix formats.
+
+    Supports:
+      - Native format:          `down_blocks.0.lokr_w1`
+      - Diffusers format:       `unet.down_blocks.0.lokr_w1`
+      - LyCORIS/Kohya format:   `lora_unet_down_blocks_0.lokr_w1`
+    """
     model_param_names = set(n for n, p in model.named_parameters() if any(kw in n for kw in ['lokr_w', 'lokr_t']))
+
+    # Build reverse mapping from LyCORIS-style key -> model param name
+    lycoris_to_model = {}
+    for name in model_param_names:
+        parts = name.rsplit('.', 1)
+        if len(parts) == 2:
+            module_path, weight_name = parts
+            lycoris_module = module_path.replace('.', '_')
+            lycoris_key = lycoris_module + '.' + weight_name
+            lycoris_to_model[lycoris_key] = name
+
+    prefix_map_strip = [
+        ('lora_unet_', ''),
+        ('lora_te1_', ''),
+        ('lora_te2_', ''),
+        ('lora_te_', ''),
+        ('unet.', ''),
+        ('text_encoder.', ''),
+        ('text_encoder_2.', ''),
+        ('transformer.', ''),
+        ('diffusion_model.', ''),
+    ]
+
     loadable = {}
     for k, v in state_dict.items():
-        stripped = re.sub(r'^(transformer|diffusion_model|unet|text_encoder)\.', '', k)
-        if stripped in model_param_names:
-            loadable[stripped] = v
-        elif k in model_param_names:
+        if k in model_param_names:
             loadable[k] = v
+            continue
+
+        for prefix, replacement in prefix_map_strip:
+            stripped = k[len(prefix):] if k.startswith(prefix) else None
+            if stripped is not None and stripped in model_param_names:
+                loadable[stripped] = v
+                break
+            if stripped is not None and stripped in lycoris_to_model:
+                loadable[lycoris_to_model[stripped]] = v
+                break
+
     if not loadable:
         raise RuntimeError('No matching LoKr parameters found in state dict')
-    model.load_state_dict(loadable, strict=False)
+    model.load_state_dict(loadable, strict=True)
+
+
+def convert_lokr_state_dict_to_lycoris(state_dict, adapter_config=None, default_prefix='lora_unet_'):
+    """Convert LoKr state dict from diffusion-pipe format to LyCORIS/Kohya format.
+
+    Handles key conversion:
+      unet.xxx.lokr_w1            -> lora_unet_xxx.lokr_w1
+      text_encoder.xxx.lokr_w1    -> lora_te1_xxx.lokr_w1
+      text_encoder_2.xxx.lokr_w1  -> lora_te2_xxx.lokr_w1
+
+    Keys without a known prefix get `default_prefix` added.
+    """
+    prefix_map = {
+        'unet.': 'lora_unet_',
+        'text_encoder.': 'lora_te1_',
+        'text_encoder_2.': 'lora_te2_',
+    }
+
+    new_state_dict = {}
+    for key, tensor in state_dict.items():
+        suffix_idx = -1
+        for keyword in ['.lokr_w', '.lokr_t']:
+            idx = key.rfind(keyword)
+            if idx > 0:
+                suffix_idx = idx
+                break
+
+        if suffix_idx < 0:
+            new_state_dict[key] = tensor
+            continue
+
+        weight_suffix = key[suffix_idx:]
+        module_path = key[:suffix_idx]
+
+        converted = False
+        for prefix, replacement in prefix_map.items():
+            if module_path.startswith(prefix):
+                rest = module_path[len(prefix):]
+                rest = rest.replace('.', '_')
+                new_key = replacement + rest + weight_suffix
+                new_state_dict[new_key] = tensor
+                converted = True
+                break
+
+        if not converted and default_prefix is not None:
+            rest = module_path.replace('.', '_')
+            new_key = default_prefix + rest + weight_suffix
+            new_state_dict[new_key] = tensor
+        elif not converted:
+            new_state_dict[key] = tensor
+
+    return new_state_dict
