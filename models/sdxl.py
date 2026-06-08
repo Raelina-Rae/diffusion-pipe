@@ -356,6 +356,20 @@ def apply_debiased_estimation(loss, timesteps, noise_scheduler, v_prediction=Fal
     return loss
 
 
+def apply_multires_noise_discount(base_loss, output, target, discount, iterations):
+    loss = base_loss.clone()
+    weight = discount
+    for _ in range(iterations):
+        if output.shape[-1] < 2 or output.shape[-2] < 2:
+            break
+        output = F.avg_pool2d(output, 2)
+        target = F.avg_pool2d(target, 2)
+        mse = F.mse_loss(output, target, reduction='none').mean([1, 2, 3])
+        loss = loss + weight * mse
+        weight *= discount
+    return loss
+
+
 class SDXLPipeline(BasePipeline):
     # Unique name, used to make the cache_dir path.
     name = 'sdxl'
@@ -376,6 +390,9 @@ class SDXLPipeline(BasePipeline):
         self.v_pred = self.model_config.get('v_pred', False)
         self.min_snr_gamma = self.model_config.get('min_snr_gamma', None)
         self.debiased_estimation_loss = self.model_config.get('debiased_estimation_loss', None)
+        self.noise_offset = self.model_config.get('noise_offset', None)
+        self.multires_noise_discount = self.model_config.get('multires_noise_discount', None)
+        self.multires_noise_iterations = self.model_config.get('multires_noise_iterations', 3)
 
         if self.v_pred:
             logger.info('Using v-prediction loss')
@@ -383,6 +400,10 @@ class SDXLPipeline(BasePipeline):
             logger.info(f'Using min_snr_gamma={self.min_snr_gamma}')
         if self.debiased_estimation_loss:
             logger.info('Using debiased_estimation_loss')
+        if self.noise_offset is not None:
+            logger.info(f'Using noise_offset={self.noise_offset}')
+        if self.multires_noise_discount is not None:
+            logger.info(f'Using multires_noise_discount={self.multires_noise_discount}')
 
         self.diffusers_pipeline = diffusers.StableDiffusionXLPipeline.from_single_file(
             self.model_config['checkpoint_path'],
@@ -520,15 +541,7 @@ class SDXLPipeline(BasePipeline):
             safetensors.torch.save_file(kohya_sd, save_dir / 'lora.safetensors', metadata={'format': 'pt'})
         elif adapter_type == 'lokr':
             lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict)
-            meta = {
-                'format': 'pt',
-                'ss_network_module': 'lycoris.modules.lokr',
-                'ss_network_dim': str(self.config['adapter']['rank']),
-                'ss_network_alpha': str(self.config['adapter']['alpha']),
-            }
-            if 'factor' in self.config['adapter']:
-                meta['ss_network_args'] = str({'factor': self.config['adapter']['factor']})
-            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata=meta)
+            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 
@@ -616,6 +629,8 @@ class SDXLPipeline(BasePipeline):
             mask = F.interpolate(mask, size=(h, w), mode='nearest-exact')  # resize to latent spatial dimension
 
         noise = torch.randn_like(latents, device=device)
+        if self.noise_offset is not None:
+            noise = noise + self.noise_offset * torch.randn(bs, channels, 1, 1, device=device)
         min_timestep = 0
         max_timestep = self.scheduler.config.num_train_timesteps
         if timestep_quantile is not None:
@@ -710,11 +725,12 @@ class SDXLPipeline(BasePipeline):
                 output = output.to(torch.float32)
                 target = target.to(output.device, torch.float32)
                 loss = F.mse_loss(output, target, reduction='none')
-                # empty tensor means no masking
                 if mask.numel() > 0:
                     mask = mask.to(output.device, torch.float32)
                     loss *= mask
                 loss = loss.mean([1, 2, 3])
+                if self.multires_noise_discount is not None:
+                    loss = apply_multires_noise_discount(loss, output, target, self.multires_noise_discount, self.multires_noise_iterations)
                 if self.min_snr_gamma is not None:
                     loss = apply_snr_weight(loss, timesteps, self.scheduler, self.min_snr_gamma, self.v_pred)
                 if self.debiased_estimation_loss is not None:

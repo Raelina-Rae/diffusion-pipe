@@ -145,6 +145,8 @@ def set_config_defaults(config):
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 
     config.setdefault('logging_steps', 1)
+    if 'train_steps' in config and 'max_steps' not in config:
+        config['max_steps'] = config['train_steps']
     config.setdefault('eval_datasets', [])
     config.setdefault('eval_gradient_accumulation_steps', 1)
     config.setdefault('eval_every_n_steps', None)

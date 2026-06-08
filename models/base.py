@@ -220,13 +220,7 @@ class BasePipeline:
     def save_adapter(self, save_dir, state_dict):
         if any('.lokr_w' in k for k in state_dict):
             lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict)
-            meta = {
-                'format': 'pt',
-                'ss_network_module': 'lycoris.modules.lokr',
-                'ss_network_dim': str(self.adapter_config['rank']),
-                'ss_network_alpha': str(self.adapter_config['alpha']),
-            }
-            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata=meta)
+            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
             return
         raise NotImplementedError()
 
@@ -530,13 +524,7 @@ class ComfyPipeline:
     def save_adapter(self, save_dir, sd):
         if any('.lokr_w' in k for k in sd):
             lycoris_sd = convert_lokr_state_dict_to_lycoris(sd)
-            meta = {
-                'format': 'pt',
-                'ss_network_module': 'lycoris.modules.lokr',
-                'ss_network_dim': str(self.adapter_config['rank']),
-                'ss_network_alpha': str(self.adapter_config['alpha']),
-            }
-            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata=meta)
+            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
         else:
             self.peft_config.save_pretrained(save_dir)
             sd = {'diffusion_model.'+k: v for k, v in sd.items()}
