@@ -1,3 +1,4 @@
+import math
 import re
 from pathlib import Path
 
@@ -356,18 +357,24 @@ def apply_debiased_estimation(loss, timesteps, noise_scheduler, v_prediction=Fal
     return loss
 
 
-def apply_multires_noise_discount(base_loss, output, target, discount, iterations):
+def apply_multiscale_loss(base_loss, output, target, weight):
     loss = base_loss.clone()
-    weight = discount
-    for _ in range(iterations):
+    _, _, H, W = output.shape
+    full_res_pixels = math.sqrt(H * W) * 8
+    total_weight = 1.0 / full_res_pixels
+    loss = loss * total_weight
+    while True:
         if output.shape[-1] < 2 or output.shape[-2] < 2:
             break
         output = F.avg_pool2d(output, 2)
         target = F.avg_pool2d(target, 2)
+        _, _, h, w = output.shape
+        pixel_side = math.sqrt(h * w) * 8
+        scale_weight = weight / pixel_side
         mse = F.mse_loss(output, target, reduction='none').mean([1, 2, 3])
-        loss = loss + weight * mse
-        weight *= discount
-    return loss
+        loss = loss + scale_weight * mse
+        total_weight += scale_weight
+    return loss / total_weight
 
 
 class SDXLPipeline(BasePipeline):
@@ -391,8 +398,7 @@ class SDXLPipeline(BasePipeline):
         self.min_snr_gamma = self.model_config.get('min_snr_gamma', None)
         self.debiased_estimation_loss = self.model_config.get('debiased_estimation_loss', None)
         self.noise_offset = self.model_config.get('noise_offset', None)
-        self.multires_noise_discount = self.model_config.get('multires_noise_discount', None)
-        self.multires_noise_iterations = self.model_config.get('multires_noise_iterations', 3)
+        self.multiscale_loss_weight = self.model_config.get('multiscale_loss_weight', None)
 
         if self.v_pred:
             logger.info('Using v-prediction loss')
@@ -402,8 +408,8 @@ class SDXLPipeline(BasePipeline):
             logger.info('Using debiased_estimation_loss')
         if self.noise_offset is not None:
             logger.info(f'Using noise_offset={self.noise_offset}')
-        if self.multires_noise_discount is not None:
-            logger.info(f'Using multires_noise_discount={self.multires_noise_discount}')
+        if self.multiscale_loss_weight is not None:
+            logger.info(f'Using multiscale_loss_weight={self.multiscale_loss_weight}')
 
         self.diffusers_pipeline = diffusers.StableDiffusionXLPipeline.from_single_file(
             self.model_config['checkpoint_path'],
@@ -729,8 +735,8 @@ class SDXLPipeline(BasePipeline):
                     mask = mask.to(output.device, torch.float32)
                     loss *= mask
                 loss = loss.mean([1, 2, 3])
-                if self.multires_noise_discount is not None:
-                    loss = apply_multires_noise_discount(loss, output, target, self.multires_noise_discount, self.multires_noise_iterations)
+                if self.multiscale_loss_weight is not None:
+                    loss = apply_multiscale_loss(loss, output, target, self.multiscale_loss_weight)
                 if self.min_snr_gamma is not None:
                     loss = apply_snr_weight(loss, timesteps, self.scheduler, self.min_snr_gamma, self.v_pred)
                 if self.debiased_estimation_loss is not None:
