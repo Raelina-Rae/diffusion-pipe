@@ -44,14 +44,33 @@ def shuffle_with_seed(l, seed=None):
     random.setstate(rng_state)
 
 
-def shuffle_captions(captions: list[str], count: int = 0, delimiter: str = ', ', caption_prefix: str = '') -> list[str]:
+def shuffle_captions(captions: list[str], count: int = 0, delimiter: str = ', ', caption_prefix: str = '',
+                     keep_tokens: int = None, keep_tokens_separator: str = None) -> list[str]:
     if count == 0:
         return [caption_prefix + c for c in captions]
 
     def shuffle_caption(caption: str, delimiter: str = ", ") -> str:
-        split = caption.split(delimiter)
-        random.shuffle(split)
-        return delimiter.join(split)
+        if keep_tokens_separator is not None and keep_tokens_separator in caption:
+            parts = caption.split(keep_tokens_separator, 1)
+            fixed = parts[0].rstrip()
+            rest = parts[1].lstrip()
+            tokens = rest.split(delimiter)
+            random.shuffle(tokens)
+            shuffled = delimiter.join(tokens)
+            if fixed and not fixed.endswith(delimiter.rstrip()):
+                fixed += delimiter
+            return fixed + shuffled
+        elif keep_tokens is not None and keep_tokens > 0:
+            tokens = caption.split(delimiter)
+            fixed_tokens = tokens[:keep_tokens]
+            shuffle_tokens = tokens[keep_tokens:]
+            if shuffle_tokens:
+                random.shuffle(shuffle_tokens)
+            return delimiter.join(fixed_tokens + shuffle_tokens)
+        else:
+            tokens = caption.split(delimiter)
+            random.shuffle(tokens)
+            return delimiter.join(tokens)
 
     return [caption_prefix + shuffle_caption(caption, delimiter) for caption in captions for _ in range(count)]
 
@@ -535,6 +554,8 @@ class DirectoryDataset:
         self.shuffle_metadata = directory_config['shuffle_metadata']
         self.directory_config['cache_shuffle_num'] = self.shuffle # Make accessible if it wasn't yet, for picking one out
         self.shuffle_delimiter = directory_config.get('cache_shuffle_delimiter', dataset_config.get('cache_shuffle_delimiter', ", "))
+        self.keep_tokens = directory_config.get('keep_tokens', dataset_config.get('keep_tokens', None))
+        self.keep_tokens_separator = directory_config.get('keep_tokens_separator', dataset_config.get('keep_tokens_separator', None))
         self.path = Path(self.directory_config['path'])
         self.mask_path = Path(self.directory_config['mask_path']) if 'mask_path' in self.directory_config else None
         self.control_path = Path(self.directory_config['control_path']) if 'control_path' in self.directory_config else None
@@ -822,7 +843,8 @@ class DirectoryDataset:
                     captions = ['']
             if self.directory_config['shuffle_tags'] and self.shuffle == 0: # backwards compatibility
                 self.shuffle = 1
-            captions = shuffle_captions(captions, self.shuffle, self.shuffle_delimiter, self.directory_config['caption_prefix'])
+            captions = shuffle_captions(captions, self.shuffle, self.shuffle_delimiter, self.directory_config['caption_prefix'],
+                                        self.keep_tokens, self.keep_tokens_separator)
             if self.control_path:
                 empty_return['control_file'] = []
 

@@ -46,6 +46,11 @@ frame_buckets = [1, 33]
 # Works with cache_shuffle_num: when enabled, each image appears once per epoch with a random shuffled variant.
 # Also works with captions.json (__enable_random_caption__ key) via online_captions = true.
 # enable_random_caption = true
+# Keep the first N tokens in order when shuffling. Only used if cache_shuffle_num > 0.
+# keep_tokens = 1
+# Everything before this separator stays in order; everything after is shuffled. Overrides keep_tokens when set.
+# A comma is automatically added before the separator if missing.
+# keep_tokens_separator = '|||'
 
 # Controls whether to skip images with missing captions (true, the default if unset), or use an empty caption (false).
 #skip_empty_caption = false
