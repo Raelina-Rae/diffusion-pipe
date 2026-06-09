@@ -42,6 +42,10 @@ frame_buckets = [1, 33]
 # Delimiter for tags, only used if cache_shuffle_num is not 0. Defaults to ", ".
 # "tag1, tag2, tag3" has ", " as delimiter and will possibly be shuffled like "tag3, tag1, tag2". "tag1;tag2;tag3" has ";" as delimiter and will possibly be shuffled like "tag2;tag1;tag3".
 # cache_shuffle_delimiter = ", "
+# Randomly pick one caption variant per image each epoch instead of training on all variants.
+# Works with cache_shuffle_num: when enabled, each image appears once per epoch with a random shuffled variant.
+# Also works with captions.json (__enable_random_caption__ key) via online_captions = true.
+# enable_random_caption = true
 
 # Controls whether to skip images with missing captions (true, the default if unset), or use an empty caption (false).
 #skip_empty_caption = false

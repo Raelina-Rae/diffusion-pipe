@@ -224,6 +224,7 @@ class SizeBucketDataset:
         self.cache_dir = cache_base / f'cache_{bucket_suffix(size_bucket)}'
         self.captions_dict = directory_dataset.captions_dict  # optional
         self.enable_random_caption = directory_dataset.enable_random_caption
+        self.captions_list = {}
 
         if len(size_bucket) == 4:
             # rename old folder name to the new one for convenience
@@ -287,11 +288,13 @@ class SizeBucketDataset:
                 # Random caption mode: each image appears once in the iteration order.
                 # A caption variant is randomly selected each time __getitem__ is called.
                 iteration_order_list = []
+                self.captions_list = {}
                 for example in self.metadata_dataset.select_columns(['image_spec', 'caption']):
                     image_spec = example['image_spec']
                     latents_idx = image_spec_to_latents_idx[tuple(image_spec)]
                     # Use first caption as placeholder; actual caption is randomly picked in __getitem__.
                     iteration_order_list.append((image_spec, latents_idx, example['caption'][0], 0))
+                    self.captions_list[tuple(image_spec)] = example['caption']
                 shuffle_with_seed(iteration_order_list, 42)
             else:
                 equal_num_captions = True
@@ -339,6 +342,9 @@ class SizeBucketDataset:
             del iteration_order
 
         self.iteration_order = datasets.load_from_disk(str(iteration_order_cache_dir))
+        if self.enable_random_caption and not self.captions_list:
+            for example in self.metadata_dataset.select_columns(['image_spec', 'caption']):
+                self.captions_list[tuple(example['image_spec'])] = example['caption']
 
     def cache_text_embeddings(self, map_fn, i, regenerate_cache=False, caching_batch_size=1):
         print(f'caching text embeddings: {self.size_bucket}')
@@ -373,8 +379,14 @@ class SizeBucketDataset:
                     caption = ''
                     caption_number = 0
             else:
-                caption_number = entry['caption_number']
-                caption = entry['caption']
+                if self.enable_random_caption:
+                    key = tuple(entry['image_spec'])
+                    caption_list = self.captions_list.get(key, [entry['caption']])
+                    caption_number = random.randrange(len(caption_list))
+                    caption = caption_list[caption_number]
+                else:
+                    caption_number = entry['caption_number']
+                    caption = entry['caption']
 
         for ds, uncond_ds in zip(self.text_embedding_datasets, self.uncond_text_embeddings):
             emb_dict = uncond_ds[0] if use_uncond else ds.get_text_embeddings(tuple(entry['image_spec']), caption_number)
@@ -561,16 +573,17 @@ class DirectoryDataset:
         frame_buckets.sort()
         self.frame_buckets = np.array(frame_buckets)
 
+        self.enable_random_caption = directory_config.get('enable_random_caption', dataset_config.get('enable_random_caption', False))
         online_captions = directory_config.get('online_captions', dataset_config.get('online_captions', False))
         if online_captions:
             captions_json = self.path / CAPTIONS_JSON_FILE
             assert captions_json.exists()
             with open(captions_json) as f:
                 self.captions_dict = json.load(f)
-            self.enable_random_caption = self.captions_dict.pop('__enable_random_caption__', False)
+            captions_json_random = self.captions_dict.pop('__enable_random_caption__', False)
+            self.enable_random_caption = self.enable_random_caption or captions_json_random
         else:
             self.captions_dict = None
-            self.enable_random_caption = False
 
     def validate(self):
         resolutions = self.directory_config.get('resolutions', self.dataset_config.get('resolutions', []))
