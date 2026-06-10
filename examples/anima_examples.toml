@@ -66,9 +66,7 @@ sigmoid_scale = 1.0
 type = 'lokr'
 rank = 8
 dtype = 'bfloat16'
-factor = 8
-preset = 'full'
-full_matrix = true
+factor = 4
 
 [optimizer]
 type = 'adamw_optimi'

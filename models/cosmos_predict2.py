@@ -25,6 +25,7 @@ from accelerate.utils import set_module_tensor_to_device
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
 from models.cosmos_predict2_modeling import MiniTrainDIT
 from utils.common import load_state_dict, AUTOCAST_DTYPE, is_main_process, iterate_safetensors
+from utils.lokr import convert_lokr_state_dict_to_lycoris
 from utils.offloading import ModelOffloader
 from models.wan.vae2_1 import WanVAE_
 
@@ -318,8 +319,8 @@ class CosmosPredict2Pipeline(BasePipeline):
 
     def save_adapter(self, save_dir, state_dict):
         if any('.lokr_w' in k for k in state_dict):
-            state_dict = {'diffusion_model.'+k: v for k, v in state_dict.items()}
-            safetensors.torch.save_file(state_dict, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
+            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict)
+            safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
         else:
             self.peft_config.save_pretrained(save_dir)
             state_dict = {'diffusion_model.'+k: v for k, v in state_dict.items()}

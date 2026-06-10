@@ -131,14 +131,14 @@ def set_config_defaults(config):
                     'This script forces alpha=rank to make the saved LoKR format simpler. Please remove alpha from the config.'
                 )
             adapter_config['alpha'] = adapter_config['rank']
-            if 'conv_alpha' in adapter_config and 'conv_dim' not in adapter_config:
-                raise NotImplementedError('conv_alpha requires conv_dim to be set.')
+            if adapter_config.get('conv_alpha') is not None and adapter_config.get('conv_rank') is None:
+                raise NotImplementedError('conv_alpha requires conv_rank to be set.')
             adapter_config.setdefault('dropout', 0.0)
             adapter_config.setdefault('factor', -1)
-            adapter_config.setdefault('full_matrix', False)
             adapter_config.setdefault('use_tucker', False)
             adapter_config.setdefault('decompose_both', False)
-            adapter_config.setdefault('preset', 'attn-mlp')
+            adapter_config.setdefault('conv_rank', None)
+            adapter_config.setdefault('conv_alpha', None)
             adapter_config.setdefault('dtype', model_dtype_str)
             adapter_config['dtype'] = DTYPE_MAP[adapter_config['dtype']]
         else:

@@ -484,48 +484,14 @@ class SDXLPipeline(BasePipeline):
                 if p.requires_grad:
                     p.data = p.data.to(adapter_config['dtype'])
         elif adapter_type == 'lokr':
-            r = adapter_config['rank']
-            alpha = adapter_config['alpha']
-            dropout = adapter_config.get('dropout', 0.0)
-            factor = adapter_config.get('factor', -1)
-            full_matrix = adapter_config.get('full_matrix', False)
-            use_tucker = adapter_config.get('use_tucker', False)
-            decompose_both = adapter_config.get('decompose_both', False)
-            conv_r = adapter_config.get('conv_dim', None)
-            conv_alpha = adapter_config.get('conv_alpha', None)
-            preset = adapter_config.get('preset', 'attn-mlp')
-            target_layers = set()
-            if preset == 'full' or preset == 'attn-mlp':
-                target_layers.add('linear')
-            if preset == 'full':
-                target_layers.add('conv2d')
-
-            for p in top_level_module.parameters():
-                p.requires_grad_(False)
-
             for target_module in target_modules:
-                for name, submodule in target_module.named_modules():
-                    is_linear = isinstance(submodule, nn.Linear) and 'linear' in target_layers
-                    is_conv2d = isinstance(submodule, nn.Conv2d) and 'conv2d' in target_layers
-                    if not is_linear and not is_conv2d:
-                        continue
-                    parts = name.split('.')
-                    parent = target_module
-                    for part in parts[:-1]:
-                        parent = getattr(parent, part)
-
-                    lokr = LoKrModule(
-                        submodule, r=r, alpha=alpha, dropout=dropout, factor=factor,
-                        full_matrix=full_matrix, use_tucker=use_tucker,
-                        decompose_both=decompose_both,
-                        conv_r=conv_r, conv_alpha=conv_alpha,
-                    )
-                    lokr = lokr.to(dtype=submodule.weight.dtype, device=submodule.weight.device)
-                    setattr(parent, parts[-1], lokr)
+                apply_lokr_to_model(
+                    target_module, adapter_config,
+                    target_module_classes=None,
+                )
 
             for name, p in top_level_module.named_parameters():
                 if any(kw in name for kw in ['lokr_w', 'lokr_t']):
-                    p.requires_grad_(True)
                     p.original_name = state_dict_key_prefix + name
                     p.data = p.data.to(adapter_config['dtype'])
         else:
