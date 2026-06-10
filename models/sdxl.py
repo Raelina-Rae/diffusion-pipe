@@ -359,21 +359,15 @@ def apply_debiased_estimation(loss, timesteps, noise_scheduler, v_prediction=Fal
 
 def apply_multiscale_loss(base_loss, output, target, weight):
     loss = base_loss.clone()
-    _, _, H, W = output.shape
-    full_res_pixels = math.sqrt(H * W) * 8
-    total_weight = 1.0 / full_res_pixels
-    loss = loss * total_weight
+    total_weight = 1.0
     while True:
         if output.shape[-1] < 2 or output.shape[-2] < 2:
             break
         output = F.avg_pool2d(output, 2)
         target = F.avg_pool2d(target, 2)
-        _, _, h, w = output.shape
-        pixel_side = math.sqrt(h * w) * 8
-        scale_weight = weight / pixel_side
         mse = F.mse_loss(output, target, reduction='none').mean([1, 2, 3])
-        loss = loss + scale_weight * mse
-        total_weight += scale_weight
+        loss = loss + weight * mse
+        total_weight += weight
     return loss / total_weight
 
 
