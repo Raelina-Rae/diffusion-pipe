@@ -8,6 +8,12 @@ This is a customized fork of [diffusion-pipe](https://github.com/tdrussell/diffu
 - **Multi-caption training pipeline** — `tools/build_captions_to_metadata.py` builds a `captions.json` with multiple caption variants per image (full tags, natural language, and tag-dropout variants).
 - **Multi-level caption with random pick** — When `captions.json` contains multiple variants per image, the training script picks one at random each cycle for varied conditioning. Requires `online_captions = true` in the dataset config (under the dataset directory or global config). Enable it via `build_captions_to_metadata.py --enable_random_caption`.
 
+**SDXL-specific features:**
+- **Tag ordering training** — Support for `keep_tokens` and `keep_tokens_separator` config options, enabling tag ordering during SDXL training.
+- **Noise offset** — Added `noise_offset` config option for SDXL training.
+- **(experimental) Multiscale loss** — Experimental support for multiscale loss weighting during SDXL training. May be unstable, use with caution.
+- **Note:** To train SDXL models, you need to downgrade `diffusers` to `0.31.0` and `transformers` to `4.46.3`.
+
 ---
 
 A pipeline parallel training script for diffusion models.
