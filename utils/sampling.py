@@ -271,6 +271,14 @@ def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path, 
             prompt_embeds, pooled, neg_prompt_embeds, neg_pooled = model.encode_prompt(
                 p.prompt, negative_prompt=p.negative_prompt or None,
             )
+            if prompt_embeds.shape[1] != neg_prompt_embeds.shape[1]:
+                max_len = max(prompt_embeds.shape[1], neg_prompt_embeds.shape[1])
+                if prompt_embeds.shape[1] < max_len:
+                    pad = torch.zeros(prompt_embeds.shape[0], max_len - prompt_embeds.shape[1], prompt_embeds.shape[2], device=prompt_embeds.device, dtype=prompt_embeds.dtype)
+                    prompt_embeds = torch.cat([prompt_embeds, pad], dim=1)
+                else:
+                    pad = torch.zeros(neg_prompt_embeds.shape[0], max_len - neg_prompt_embeds.shape[1], neg_prompt_embeds.shape[2], device=neg_prompt_embeds.device, dtype=neg_prompt_embeds.dtype)
+                    neg_prompt_embeds = torch.cat([neg_prompt_embeds, pad], dim=1)
             bs = sample_cfg.batch_size
             if bs > 1:
                 prompt_embeds = prompt_embeds.repeat(bs, 1, 1)
