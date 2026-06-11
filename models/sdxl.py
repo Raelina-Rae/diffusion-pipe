@@ -1,4 +1,5 @@
 import math
+import random
 import re
 from pathlib import Path
 
@@ -386,18 +387,17 @@ def apply_debiased_estimation(loss, timesteps, noise_scheduler, v_prediction=Fal
     return loss
 
 
-def apply_multiscale_loss(base_loss, output, target, weight):
-    loss = base_loss.clone()
-    total_weight = 1.0
-    while True:
-        if output.shape[-1] < 2 or output.shape[-2] < 2:
+def pyramid_noise_like(noise, iterations, discount):
+    b, c, w, h = noise.shape
+    upsample = torch.nn.Upsample(size=(w, h), mode="bilinear", align_corners=False)
+    for i in range(iterations):
+        r = random.random() * 2 + 2
+        wn = max(1, int(w / (r ** i)))
+        hn = max(1, int(h / (r ** i)))
+        noise = noise + upsample(torch.randn(b, c, wn, hn, device=noise.device)) * discount ** i
+        if wn == 1 or hn == 1:
             break
-        output = F.avg_pool2d(output, 2)
-        target = F.avg_pool2d(target, 2)
-        mse = F.mse_loss(output, target, reduction='none').mean([1, 2, 3])
-        loss = loss + weight * mse
-        total_weight += weight
-    return loss / total_weight
+    return noise / noise.std()
 
 
 class SDXLPipeline(BasePipeline):
@@ -421,7 +421,8 @@ class SDXLPipeline(BasePipeline):
         self.min_snr_gamma = self.model_config.get('min_snr_gamma', None)
         self.debiased_estimation_loss = self.model_config.get('debiased_estimation_loss', None)
         self.noise_offset = self.model_config.get('noise_offset', None)
-        self.multiscale_loss_weight = self.model_config.get('multiscale_loss_weight', None)
+        self.multires_noise_iterations = self.model_config.get('multires_noise_iterations', None)
+        self.multires_noise_discount = self.model_config.get('multires_noise_discount', 0.3)
         self.shift = self.model_config.get('shift', None)
         self.flux_shift = self.model_config.get('flux_shift', False)
 
@@ -433,8 +434,8 @@ class SDXLPipeline(BasePipeline):
             logger.info('Using debiased_estimation_loss')
         if self.noise_offset is not None:
             logger.info(f'Using noise_offset={self.noise_offset}')
-        if self.multiscale_loss_weight is not None:
-            logger.info(f'Using multiscale_loss_weight={self.multiscale_loss_weight}')
+        if self.multires_noise_iterations is not None:
+            logger.info(f'Using multires_noise_iterations={self.multires_noise_iterations}, multires_noise_discount={self.multires_noise_discount}')
         if self.shift is not None:
             logger.info(f'Using noise schedule shift={self.shift}')
         if self.flux_shift:
@@ -637,6 +638,8 @@ class SDXLPipeline(BasePipeline):
         noise = torch.randn_like(latents, device=device)
         if self.noise_offset is not None:
             noise = noise + self.noise_offset * torch.randn(bs, channels, 1, 1, device=device)
+        if self.multires_noise_iterations is not None:
+            noise = pyramid_noise_like(noise, self.multires_noise_iterations, self.multires_noise_discount)
         min_timestep = 0
         max_timestep = self.scheduler.config.num_train_timesteps
         if timestep_quantile is not None:
@@ -767,8 +770,6 @@ class SDXLPipeline(BasePipeline):
                     mask = mask.to(output.device, torch.float32)
                     loss *= mask
                 loss = loss.mean([1, 2, 3])
-                if self.multiscale_loss_weight is not None:
-                    loss = apply_multiscale_loss(loss, output, target, self.multiscale_loss_weight)
                 if self.min_snr_gamma is not None:
                     loss = apply_snr_weight(loss, timesteps, self.scheduler, self.min_snr_gamma, self.v_pred)
                 if self.debiased_estimation_loss is not None:
