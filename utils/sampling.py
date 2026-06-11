@@ -235,18 +235,43 @@ def _sample_sdxl_in_memory(model: Any, sample_cfg: SampleConfig, out_dir: Path, 
     if sample_cfg.seed is not None:
         generator.manual_seed(int(sample_cfg.seed))
 
+    max_token_length = getattr(model, 'model_config', {}).get('max_token_length', None)
+    use_custom_encoding = max_token_length is not None
+
     img_idx = 0
     saved: list[tuple[Path, str]] = []
     for p in sample_cfg.prompts:
-        images = pipe(
-            prompt=[p.prompt] * sample_cfg.batch_size,
-            negative_prompt=[p.negative_prompt] * sample_cfg.batch_size if p.negative_prompt else None,
-            width=sample_cfg.width,
-            height=sample_cfg.height,
-            num_inference_steps=sample_cfg.num_inference_steps,
-            guidance_scale=sample_cfg.guidance_scale,
-            generator=generator,
-        ).images
+        if use_custom_encoding:
+            prompt_embeds, pooled, neg_prompt_embeds, neg_pooled = model.encode_prompt(
+                p.prompt, negative_prompt=p.negative_prompt or None,
+            )
+            bs = sample_cfg.batch_size
+            if bs > 1:
+                prompt_embeds = prompt_embeds.repeat(bs, 1, 1)
+                pooled = pooled.repeat(bs, 1)
+                neg_prompt_embeds = neg_prompt_embeds.repeat(bs, 1, 1)
+                neg_pooled = neg_pooled.repeat(bs, 1)
+            images = pipe(
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled,
+                negative_prompt_embeds=neg_prompt_embeds,
+                negative_pooled_prompt_embeds=neg_pooled,
+                width=sample_cfg.width,
+                height=sample_cfg.height,
+                num_inference_steps=sample_cfg.num_inference_steps,
+                guidance_scale=sample_cfg.guidance_scale,
+                generator=generator,
+            ).images
+        else:
+            images = pipe(
+                prompt=[p.prompt] * sample_cfg.batch_size,
+                negative_prompt=[p.negative_prompt] * sample_cfg.batch_size if p.negative_prompt else None,
+                width=sample_cfg.width,
+                height=sample_cfg.height,
+                num_inference_steps=sample_cfg.num_inference_steps,
+                guidance_scale=sample_cfg.guidance_scale,
+                generator=generator,
+            ).images
 
         for img in images:
             stem = _gl_style_stem(step, img_idx)

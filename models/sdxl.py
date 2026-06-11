@@ -642,6 +642,30 @@ class SDXLPipeline(BasePipeline):
         input_ids = tokenizer(prompt, **tokenizer_kwargs).input_ids.to(torch.int64)
         return input_ids
 
+    def _encode_single_prompt(self, prompt: str, max_token_length: int | None):
+        input_ids = self._get_input_ids(prompt, self.tokenizer, max_token_length)
+        input_ids_2 = self._get_input_ids(prompt, self.tokenizer_2, max_token_length)
+        device = self.text_encoder.device
+        input_ids = input_ids.to(device)
+        input_ids_2 = input_ids_2.to(device)
+        prompt_embeds = _encode_prompt_with_chunking(input_ids, self.tokenizer, self.text_encoder, clip_skip=None)
+        prompt_embeds_2, pooled = _encode_prompt_with_chunking(
+            input_ids_2, self.tokenizer_2, self.text_encoder_2,
+            clip_skip=None, return_pooled=True,
+        )
+        encoder_hidden_states = torch.cat([prompt_embeds, prompt_embeds_2], dim=-1)
+        return encoder_hidden_states, pooled
+
+    def encode_prompt(self, prompt: str, negative_prompt: str | None = None):
+        max_token_length = self.model_config.get('max_token_length', None)
+        prompt_embeds, pooled_prompt_embeds = self._encode_single_prompt(prompt, max_token_length)
+        if negative_prompt:
+            neg_prompt_embeds, neg_pooled_prompt_embeds = self._encode_single_prompt(negative_prompt, max_token_length)
+        else:
+            neg_prompt_embeds = torch.zeros_like(prompt_embeds)
+            neg_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds)
+        return prompt_embeds, pooled_prompt_embeds, neg_prompt_embeds, neg_pooled_prompt_embeds
+
     def to_layers(self):
         layers = [InitialLayer(self.diffusers_pipeline)]
         unet = self.diffusers_pipeline.unet
@@ -704,6 +728,44 @@ class SDXLPipeline(BasePipeline):
                 loss = loss.mean()
             return loss
         return loss_fn
+
+
+def _encode_prompt_with_chunking(input_ids, tokenizer, text_encoder, clip_skip=None, return_pooled=False):
+    bos = tokenizer.bos_token_id
+    eos = tokenizer.eos_token_id
+    pad = tokenizer.pad_token_id
+    bs = input_ids.shape[0]
+    device = input_ids.device
+    chunks = torch.split(input_ids, tokenizer.model_max_length - 2, dim=-1)
+    processed_chunks = []
+    for chunk in chunks:
+        chunk = torch.cat(
+            [
+                torch.full((bs, 1), bos, device=device),
+                chunk,
+                torch.full((bs, 1), pad, device=device),
+            ],
+            dim=-1,
+        )
+        first_pad_idx = torch.argmax((chunk == pad).to(torch.int32), dim=-1)
+        chunk[torch.arange(chunk.shape[0]), first_pad_idx] = eos
+        processed_chunks.append(chunk)
+
+    embed_chunks = []
+    for i, input_ids in enumerate(processed_chunks):
+        prompt_embeds = text_encoder(input_ids, output_hidden_states=True)
+        if i == 0 and return_pooled:
+            pooled_prompt_embeds = prompt_embeds[0]
+        if clip_skip is None:
+            prompt_embeds = prompt_embeds.hidden_states[-2]
+        else:
+            prompt_embeds = prompt_embeds.hidden_states[-(clip_skip + 2)]
+        embed_chunks.append(prompt_embeds)
+
+    prompt_embeds = torch.cat(embed_chunks, dim=1)
+    if return_pooled:
+        return prompt_embeds, pooled_prompt_embeds
+    return prompt_embeds
 
 
 class InitialLayer(nn.Module):
@@ -796,47 +858,12 @@ class InitialLayer(nn.Module):
         encoder_hidden_states = torch.concat([prompt_embeds, prompt_embeds_2], dim=-1)
         return encoder_hidden_states, pooled_prompt_embeds
 
-    # Supports arbitrary length input_ids by splitting into chunks of at most model_max_length.
     def get_prompt_embeds(self, input_ids, tokenizer, text_encoder, return_pooled_prompt_embeds=False):
-        bos = tokenizer.bos_token_id
-        eos = tokenizer.eos_token_id
-        pad = tokenizer.pad_token_id
-        bs = input_ids.shape[0]
-        device = input_ids.device
-        chunks = torch.split(input_ids, tokenizer.model_max_length-2, dim=-1)
-        processed_chunks = []
-        # Add BOS and pad token, then replace the first pad token in each example with EOS.
-        for chunk in chunks:
-            chunk = torch.cat(
-                [
-                    torch.full((bs, 1), bos, device=device),
-                    chunk,
-                    torch.full((bs, 1), pad, device=device)
-                ],
-                dim=-1
-            )
-            first_pad_idx = torch.argmax((chunk == pad).to(torch.int32), dim=-1)
-            chunk[torch.arange(chunk.shape[0]), first_pad_idx] = eos
-            processed_chunks.append(chunk)
-
-        embed_chunks = []
-        for i, input_ids in enumerate(processed_chunks):
-            prompt_embeds = text_encoder(input_ids, output_hidden_states=True)
-            if i == 0 and return_pooled_prompt_embeds:
-                pooled_prompt_embeds = prompt_embeds[0]
-
-            if self.clip_skip is None:
-                prompt_embeds = prompt_embeds.hidden_states[-2]
-            else:
-                # "2" because SDXL always indexes from the penultimate layer.
-                prompt_embeds = prompt_embeds.hidden_states[-(self.clip_skip + 2)]
-
-            embed_chunks.append(prompt_embeds)
-
-        prompt_embeds = torch.cat(embed_chunks, dim=1)
-        if return_pooled_prompt_embeds:
-            return prompt_embeds, pooled_prompt_embeds
-        return prompt_embeds
+        return _encode_prompt_with_chunking(
+            input_ids, tokenizer, text_encoder,
+            clip_skip=self.clip_skip,
+            return_pooled=return_pooled_prompt_embeds,
+        )
 
 
 class DownBlockInnerLayer(nn.Module):
