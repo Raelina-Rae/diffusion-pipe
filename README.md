@@ -11,7 +11,8 @@ This is a customized fork of [diffusion-pipe](https://github.com/tdrussell/diffu
 **SDXL-specific features:**
 - **Tag ordering training** — Support for `keep_tokens` and `keep_tokens_separator` config options, enabling tag ordering during SDXL training.
 - **Noise offset** — Added `noise_offset` config option for SDXL training.
-- **(experimental) Multiscale loss** — Experimental support for multiscale loss weighting during SDXL training. May be unstable, use with caution.
+- **Multires noise (pyramid noise)** — Added `multires_noise_iterations` and `multires_noise_discount` config options for pyramid noise generation during SDXL training, matching kohya's sd-scripts implementation. Recommended: `multires_noise_iterations = 6` with `multires_noise_discount = 0.4`.
+- **(Experimental) Noise schedule shifting** — Added `shift` (manual) and `flux_shift` (auto by resolution) config options for shifted timestep sampling. Biases training toward higher noise levels at high resolutions (1280px+), improving global structure. Use `flux_shift = true` for automatic resolution-based shifting, or `shift = 2.0` for manual control. May be unstable, use with caution.
 - **Note:** To train SDXL models, you need to downgrade `diffusers` to `0.31.0` and `transformers` to `4.46.3`.
 
 ---
