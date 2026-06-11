@@ -278,6 +278,35 @@ def convert_openai_text_enc_state_dict(text_enc_dict):
     return text_enc_dict
 
 
+# Noise schedule shifting for high-resolution training (Simple Diffusion, Hoogeboom et al. 2023)
+
+def time_shift(mu: float, sigma: float, t: torch.Tensor):
+    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
+
+
+def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15):
+    m = (y2 - y1) / (x2 - x1)
+    b = y1 - m * x1
+    return lambda x: m * x + b
+
+
+def compute_sdxl_shift(latent_h: int, latent_w: int) -> float:
+    """Compute a noise schedule shift for SDXL based on latent spatial resolution.
+
+    Uses a linear mapping from latent area to log-shift, calibrated so that:
+      - 1024x1024 pixels (256x256 latent) -> shift ~1.0 (no shift, matches pre-training)
+      - 1536x1536 pixels (384x384 latent) -> shift ~2.0
+      - 2048x2048 pixels (512x512 latent) -> shift ~3.0
+    """
+    area = latent_h * latent_w
+    # Reference points in (area, shift) space:
+    #   256*256 = 65536 -> 1.0,  512*512 = 262144 -> 3.0
+    m = (3.0 - 1.0) / (262144 - 65536)
+    b = 1.0 - m * 65536
+    shift = m * area + b
+    return max(1.0, shift)
+
+
 # Copied from https://github.com/kohya-ss/sd-scripts/blob/main/library/custom_train_functions.py
 
 def prepare_scheduler_for_custom_training(noise_scheduler):
@@ -393,6 +422,8 @@ class SDXLPipeline(BasePipeline):
         self.debiased_estimation_loss = self.model_config.get('debiased_estimation_loss', None)
         self.noise_offset = self.model_config.get('noise_offset', None)
         self.multiscale_loss_weight = self.model_config.get('multiscale_loss_weight', None)
+        self.shift = self.model_config.get('shift', None)
+        self.flux_shift = self.model_config.get('flux_shift', False)
 
         if self.v_pred:
             logger.info('Using v-prediction loss')
@@ -404,6 +435,10 @@ class SDXLPipeline(BasePipeline):
             logger.info(f'Using noise_offset={self.noise_offset}')
         if self.multiscale_loss_weight is not None:
             logger.info(f'Using multiscale_loss_weight={self.multiscale_loss_weight}')
+        if self.shift is not None:
+            logger.info(f'Using noise schedule shift={self.shift}')
+        if self.flux_shift:
+            logger.info('Using flux_shift (auto noise schedule shift based on resolution)')
 
         self.diffusers_pipeline = diffusers.StableDiffusionXLPipeline.from_single_file(
             self.model_config['checkpoint_path'],
@@ -607,6 +642,14 @@ class SDXLPipeline(BasePipeline):
         if timestep_quantile is not None:
             t = int(timestep_quantile*max_timestep)
             timesteps = torch.full((bs,), t, device=device)
+        elif self.shift is not None or self.flux_shift:
+            u = torch.rand(bs, device=device)
+            if self.shift is not None:
+                shift = self.shift
+            else:
+                shift = compute_sdxl_shift(h, w)
+            u = (u * shift) / (1.0 + (shift - 1.0) * u)
+            timesteps = (u * (max_timestep - 1)).long().clamp(min_timestep, max_timestep - 1)
         else:
             timesteps = torch.randint(min_timestep, max_timestep, (bs,), device=device)
         noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
