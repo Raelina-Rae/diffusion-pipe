@@ -214,6 +214,9 @@ class BasePipeline:
                 if any(kw in name for kw in ['lokr_w', 'lokr_t']):
                     p.original_name = name
                     p.data = p.data.to(adapter_config['dtype'])
+            for name, buf in self.transformer.named_buffers():
+                if name.endswith('.alpha'):
+                    buf.original_name = name
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 
@@ -518,6 +521,9 @@ class ComfyPipeline:
                 if any(kw in name for kw in ['lokr_w', 'lokr_t']):
                     p.original_name = name
                     p.data = p.data.to(adapter_config['dtype'])
+            for name, buf in self.diffusion_model.named_buffers():
+                if name.endswith('.alpha'):
+                    buf.original_name = name
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 

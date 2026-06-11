@@ -164,32 +164,41 @@ def _get_sdxl_scheduler(pipe: Any, sampler: str, v_pred: bool = False) -> Any:
     beta_end = 0.012
     beta_schedule = "scaled_linear"
     prediction_type = "v_prediction" if v_pred else "epsilon"
+    rescale_betas_zero_snr = v_pred
 
     samplers = {
         "ddpm": lambda: diffusers.DDPMScheduler(
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
             num_train_timesteps=1000, clip_sample=False,
             prediction_type=prediction_type,
+            steps_offset=1, timestep_spacing="leading",
+            rescale_betas_zero_snr=rescale_betas_zero_snr,
         ),
         "euler": lambda: diffusers.EulerDiscreteScheduler(
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
             num_train_timesteps=1000,
             prediction_type=prediction_type,
+            steps_offset=1, timestep_spacing="leading",
+            rescale_betas_zero_snr=rescale_betas_zero_snr,
         ),
         "ddim": lambda: diffusers.DDIMScheduler(
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
             num_train_timesteps=1000, clip_sample=False,
             prediction_type=prediction_type,
+            steps_offset=1, timestep_spacing="leading",
+            rescale_betas_zero_snr=rescale_betas_zero_snr,
         ),
         "dpmpp_2m": lambda: diffusers.DPMSolverMultistepScheduler(
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
             num_train_timesteps=1000, use_karras_sigmas=False,
             prediction_type=prediction_type,
+            steps_offset=1, timestep_spacing="leading",
         ),
         "dpmpp_2m_karras": lambda: diffusers.DPMSolverMultistepScheduler(
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
             num_train_timesteps=1000, use_karras_sigmas=True,
             prediction_type=prediction_type,
+            steps_offset=1, timestep_spacing="leading",
         ),
         "dpmpp_sde": lambda: diffusers.DPMSolverSinglestepScheduler(
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
@@ -200,16 +209,19 @@ def _get_sdxl_scheduler(pipe: Any, sampler: str, v_pred: bool = False) -> Any:
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
             num_train_timesteps=1000,
             prediction_type=prediction_type,
+            steps_offset=1, timestep_spacing="leading",
         ),
         "lms": lambda: diffusers.LMSDiscreteScheduler(
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
             num_train_timesteps=1000,
             prediction_type=prediction_type,
+            steps_offset=1, timestep_spacing="leading",
         ),
         "heun": lambda: diffusers.HeunDiscreteScheduler(
             beta_start=beta_start, beta_end=beta_end, beta_schedule=beta_schedule,
             num_train_timesteps=1000,
             prediction_type=prediction_type,
+            steps_offset=1, timestep_spacing="leading",
         ),
     }
     factory = samplers.get(sampler)
@@ -218,9 +230,6 @@ def _get_sdxl_scheduler(pipe: Any, sampler: str, v_pred: bool = False) -> Any:
         factory = samplers["euler"]
 
     scheduler = factory()
-    if v_pred:
-        from models.sdxl import fix_noise_scheduler_betas_for_zero_terminal_snr
-        fix_noise_scheduler_betas_for_zero_terminal_snr(scheduler)
 
     return scheduler
 

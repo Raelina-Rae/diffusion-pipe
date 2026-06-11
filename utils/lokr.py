@@ -209,7 +209,7 @@ class LoKrModule(nn.Module):
         if self.rank_dropout is not None and self.training:
             drop = (torch.rand(result.size(0), device=result.device) > self.rank_dropout).to(result.dtype)
             drop = drop.view(-1, *([1] * (result.dim() - 1)))
-            result = result * drop
+            result = result * drop / (1.0 - self.rank_dropout)
 
         return result
 
@@ -304,6 +304,10 @@ def apply_lokr_to_model(model, adapter_config, target_module_classes=None):
             p.requires_grad_(True)
             p.original_name = name
 
+    for name, buf in model.named_buffers():
+        if name.endswith('.alpha'):
+            buf.original_name = name
+
     return replaced
 
 
@@ -384,7 +388,7 @@ def load_lokr_state_dict(model, state_dict):
 
     if not loadable:
         raise RuntimeError('No matching LoKr parameters found in state dict')
-    model.load_state_dict(loadable, strict=True)
+    model.load_state_dict(loadable, strict=False)
 
 
 def convert_lokr_state_dict_to_lycoris(state_dict, adapter_config=None, default_prefix='lora_unet_'):
@@ -409,14 +413,13 @@ def convert_lokr_state_dict_to_lycoris(state_dict, adapter_config=None, default_
     new_state_dict = {}
     for key, tensor in state_dict.items():
         suffix_idx = -1
-        for keyword in ['.lokr_w', '.lokr_t']:
+        for keyword in ['.lokr_w', '.lokr_t', '.alpha']:
             idx = key.rfind(keyword)
             if idx > 0:
                 suffix_idx = idx
                 break
 
         if suffix_idx < 0:
-            new_state_dict[key] = tensor
             continue
 
         weight_suffix = key[suffix_idx:]

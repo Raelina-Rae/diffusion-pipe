@@ -418,11 +418,10 @@ class SDXLPipeline(BasePipeline):
             beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
         )
 
-        # TODO: sd-scripts has this come first. But that's technically wrong I think. You would want to change the scheduler
-        # parameters to enforce ZTSNR before calculating the SNRs. Leaving it like this for now to match sd-scripts.
-        prepare_scheduler_for_custom_training(self.scheduler)
+        # Apply ZTSNR fix first so that all_snr is computed from the corrected betas.
         if self.v_pred:
             fix_noise_scheduler_betas_for_zero_terminal_snr(self.scheduler)
+        prepare_scheduler_for_custom_training(self.scheduler)
 
         # Probably good to always do this for SDXL.
         self.diffusers_pipeline.upcast_vae()
@@ -442,6 +441,8 @@ class SDXLPipeline(BasePipeline):
         ):
             for name, p in module.named_parameters():
                 p.original_name = state_dict_key_prefix + name
+            for name, buf in module.named_buffers():
+                buf.original_name = state_dict_key_prefix + name
 
     def get_vae(self):
         return self.vae
@@ -494,6 +495,10 @@ class SDXLPipeline(BasePipeline):
                 if any(kw in name for kw in ['lokr_w', 'lokr_t']):
                     p.original_name = state_dict_key_prefix + name
                     p.data = p.data.to(adapter_config['dtype'])
+
+            for name, buf in top_level_module.named_buffers():
+                if name.endswith('.alpha'):
+                    buf.original_name = state_dict_key_prefix + name
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 

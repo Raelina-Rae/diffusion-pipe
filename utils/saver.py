@@ -78,8 +78,11 @@ class Saver:
                         logger.warning(f'WARNING: parameter {n} requires_grad but does not have original_name. Not saving it.')
                         continue
                     partial_state_dict[p.original_name.replace('.default', '').replace('.modules_to_save', '')] = p.detach()
-                    if 'save_dtype' in self.config:
-                        convert_state_dict_dtype(partial_state_dict, self.config['save_dtype'])
+            for n, buf in self.pipeline_model.named_buffers():
+                if hasattr(buf, 'original_name'):
+                    partial_state_dict[buf.original_name] = buf.detach()
+            if 'save_dtype' in self.config:
+                convert_state_dict_dtype(partial_state_dict, self.config['save_dtype'])
             torch.save(partial_state_dict, merge_dir / f'state_dict_{stage_id}.bin')
         dist.barrier()
         if dp_id == 0 and stage_id == 0:
