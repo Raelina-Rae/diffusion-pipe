@@ -1438,12 +1438,15 @@ class PipelineDataLoader:
     def _pull_batches_from_dataloader(self):
         for batch in self.dataloader:
             features, label = self.model.prepare_inputs(batch, timestep_quantile=self.eval_quantile)
-            target, mask = label
-            # The target depends on the noise, so we must broadcast it from the first stage to the last.
-            # NOTE: I had to patch the pipeline parallel TrainSchedule so that the LoadMicroBatch commands
-            # would line up on the first and last stage so that this doesn't deadlock.
+            target = label[0]
+            mask = label[-1]
+            # Broadcast all noise-dependent tensors from stage 0 to the last stage.
+            # The label tuple is (target, [additional tensors...], mask), where the
+            # additional tensors (e.g. negative targets for contrastive flow matching)
+            # also depend on randomness and must be broadcast alongside target.
             target = self._broadcast_target(target)
-            label = (target, mask)
+            additional = [self._broadcast_target(t) if t is not None else None for t in label[1:-1]]
+            label = tuple([target] + additional + [mask])
             self.num_batches_pulled += 1
             for micro_batch in split_batch((features, label), self.gradient_accumulation_steps):
                 yield micro_batch

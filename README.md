@@ -7,6 +7,7 @@ This is a customized fork of [diffusion-pipe](https://github.com/tdrussell/diffu
 - **Sampling during training** — Generate sample outputs at intervals during training to monitor progress
 - **Multi-caption training pipeline** — `tools/build_captions_to_metadata.py` builds a `captions.json` with multiple caption variants per image (full tags, natural language, and tag-dropout variants).
 - **Multi-level caption with random pick** — When `captions.json` contains multiple variants per image, the training script picks one at random each cycle for varied conditioning. Requires `online_captions = true` in the dataset config (under the dataset directory or global config). Enable it via `build_captions_to_metadata.py --enable_random_caption`.
+- **(Experimental) Contrastive Flow Matching** — Applies a contrastive objective during training that encourages the model to produce distinct velocity predictions for different conditions, improving training convergence and generation quality. Based on [Contrastive Flow Matching](https://arxiv.org/abs/2506.05350). For Anima models, set `contrastive_flow_lambda` in the `[model]` section of your config (e.g., `contrastive_flow_lambda = 0.05`). Default is 0 (disabled).
 
 **SDXL-specific features:**
 - **Tag ordering training** — Support for `keep_tokens` and `keep_tokens_separator` config options, enabling tag ordering during SDXL training.

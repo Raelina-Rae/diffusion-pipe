@@ -190,6 +190,7 @@ class CosmosPredict2Pipeline(BasePipeline):
         dtype = self.model_config['dtype']
         self.cache_text_embeddings = self.model_config.get('cache_text_embeddings', True)
         self.multiscale_loss_weight = self.model_config.get('multiscale_loss_weight', None)
+        self.contrastive_flow_lambda = self.model_config.get('contrastive_flow_lambda', 0)
 
         # This isn't a nn.Module.
         self.vae = WanVAE(
@@ -409,9 +410,16 @@ class CosmosPredict2Pipeline(BasePipeline):
         t_expanded = t.view(-1, 1, 1, 1, 1)
         noisy_latents = (1 - t_expanded)*latents + t_expanded*noise
         target = noise - latents
+
+        if self.contrastive_flow_lambda > 0:
+            neg_indices = (torch.randperm(bs, device=latents.device) + torch.arange(bs, device=latents.device)) % bs
+            negative_target = target[neg_indices]
+        else:
+            negative_target = None
+
         t = t.view(-1, 1)
 
-        return (noisy_latents, t, *prompt_embeds_or_batch_encoding), (target, mask)
+        return (noisy_latents, t, *prompt_embeds_or_batch_encoding), (target, mask, negative_target)
 
     def to_layers(self):
         transformer = self.transformer
@@ -496,8 +504,9 @@ class CosmosPredict2Pipeline(BasePipeline):
         return param_groups
 
     def get_loss_fn(self):
+        contrastive_lambda = self.contrastive_flow_lambda
         def loss_fn(output, label):
-            target, mask = label
+            target, mask, negative_target = label
             with torch.autocast('cuda', enabled=False):
                 output = output.to(torch.float32)
                 target = target.to(output.device, torch.float32)
@@ -512,6 +521,14 @@ class CosmosPredict2Pipeline(BasePipeline):
                     mask = mask.to(output.device, torch.float32)
                     loss *= mask
                 loss = loss.mean()
+
+                if contrastive_lambda > 0 and negative_target is not None:
+                    negative_target = negative_target.to(output.device, torch.float32)
+                    contrastive_loss = F.mse_loss(output, negative_target, reduction='none')
+                    if mask.numel() > 0:
+                        contrastive_loss *= mask.to(output.device, torch.float32)
+                    contrastive_loss = contrastive_loss.mean()
+                    loss = loss - contrastive_lambda * contrastive_loss
 
                 if weight := self.multiscale_loss_weight:
                     assert output.ndim == 5 and target.ndim == 5
