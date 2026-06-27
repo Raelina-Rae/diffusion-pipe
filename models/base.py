@@ -281,6 +281,15 @@ class BasePipeline:
     def get_param_groups(self, parameters):
         return [{'params': parameters}]
 
+    # List of original_name prefixes whose 2D weight matrices should be excluded
+    # from Muon-style orthogonalization (Newton-Schulz) and fall back to Adam.
+    # Used by the `genericoptim` optimizer when muon/adamuon/normuon is enabled.
+    # Models override this to exclude first/last linear layers of the core network
+    # (MMDiT x_embedder/final_layer, UNet conv_in/conv_out + time/add embeddings, etc.),
+    # consistent with the LLM literature excluding embeddings and LM-head params from Muon.
+    def get_muon_exclude_prefixes(self):
+        return []
+
     # Default loss_fn. MSE between output and target, with mask support.
     def get_loss_fn(self):
         def loss_fn(output, label):
@@ -638,6 +647,15 @@ class ComfyPipeline:
     # supports separate learning rates for unet and text encoders.
     def get_param_groups(self, parameters):
         return [{'params': parameters}]
+
+    # List of original_name prefixes whose 2D weight matrices should be excluded
+    # from Muon-style orthogonalization (Newton-Schulz) and fall back to Adam.
+    # Used by the `genericoptim` optimizer when muon/adamuon/normuon is enabled.
+    # Models override this to exclude first/last linear layers of the core network
+    # (MMDiT x_embedder/final_layer, UNet conv_in/conv_out + time/add embeddings, etc.),
+    # consistent with the LLM literature excluding embeddings and LM-head params from Muon.
+    def get_muon_exclude_prefixes(self):
+        return []
 
     # Default loss_fn. MSE between output and target, with mask support.
     def get_loss_fn(self):

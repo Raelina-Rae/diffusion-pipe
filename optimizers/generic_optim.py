@@ -315,6 +315,7 @@ class GenericOptim(Optimizer):
             polar_express=False,
             compile=False,
             automagic=False,
+            nesterov=False,
             min_lr=1e-7,
             max_lr=1e-3,
             lr_bump=1e-6, # amount to bump the lr when adjusting
@@ -331,6 +332,7 @@ class GenericOptim(Optimizer):
         self.cpu_offload = cpu_offload
         self.kahan_buffer_offload = kahan_buffer_offload
         self.mpu = mpu
+        self.nesterov = nesterov
 
         if polar_express:
             self.orthogonalize = polar_express_fn
@@ -357,7 +359,7 @@ class GenericOptim(Optimizer):
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
               f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}, "
-              f"cpu_offload={cpu_offload}, muon={muon}, adamuon={adamuon}, normuon={normuon}, compile={compile}, automagic={automagic}, min_lr={min_lr}, "
+              f"cpu_offload={cpu_offload}, muon={muon}, adamuon={adamuon}, normuon={normuon}, compile={compile}, automagic={automagic}, nesterov={nesterov}, min_lr={min_lr}, "
               f"max_lr={max_lr}, lr_bump={lr_bump}, lr_decrease_factor={lr_decrease_factor}")
 
     @torch.no_grad()
@@ -420,6 +422,11 @@ class GenericOptim(Optimizer):
 
                 if muon or adamuon or normuon:
                     rows, cols = numerator.shape[-2:]
+                    # Nesterov-style momentum (Moonlight / Keller Jordan Muon): feed
+                    # mu*M_t + grad to the Newton-Schulz iteration instead of M_t.
+                    # Computed before the 4D->2D reshape so p.grad and numerator share shape.
+                    if self.nesterov:
+                        numerator = p.grad + group["betas"][0] * numerator
                     if numerator.ndim == 4: # for the case of conv filters
                         numerator = numerator.view(len(numerator), -1)
                     numerator = self.orthogonalize(numerator)

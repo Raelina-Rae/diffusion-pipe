@@ -723,15 +723,23 @@ if __name__ == '__main__':
                 kwargs['momentum'] = kwargs['momentum'] ** (1/gas)
 
             optimizer_dict = {}
+            exclude_prefixes = model.get_muon_exclude_prefixes()
+            adapter_low_rank_tags = ('lokr_w', 'lokr_t', 'lora_A', 'lora_B')
             for pg in model.get_param_groups(model_parameters):
-                param_kwargs = kwargs.copy()
                 if isinstance(pg, dict):
                     # param group
                     for p in pg['params']:
+                        param_kwargs = kwargs.copy()
                         param_kwargs['lr'] = pg['lr']
+                        name = getattr(p, 'original_name', '')
+                        if any(name.startswith(pre) for pre in exclude_prefixes) or any(tag in name for tag in adapter_low_rank_tags):
+                            param_kwargs['muon'] = False
+                            param_kwargs['adamuon'] = False
+                            param_kwargs['normuon'] = False
                         optimizer_dict[p] = klass([p], **param_kwargs)
                 else:
                     # param
+                    param_kwargs = kwargs.copy()
                     optimizer_dict[pg] = klass([pg], **param_kwargs)
 
             def optimizer_hook(p):
@@ -746,13 +754,32 @@ if __name__ == '__main__':
         elif optim_type_lower == 'genericoptim':
             kwargs['compile'] = config['compile']
             kwargs['mpu'] = pipeline_model.mpu()
+            exclude_prefixes = model.get_muon_exclude_prefixes()
+            adapter_low_rank_tags = ('lokr_w', 'lokr_t', 'lora_A', 'lora_B')
             new_param_groups = []
             param_groups = model.get_param_groups(model_parameters)
             for pg in param_groups:
                 params = pg.pop('params')
+                # First split: separate Muon-excluded params (name-matched OR adapter low-rank)
+                # which fall back to Adam regardless of ndim. The 2D / non-2D shape split is
+                # then applied only to the remaining params.
+                params_muon_excluded = []
+                params_remaining = []
+                for p in params:
+                    name = getattr(p, 'original_name', '')
+                    if any(name.startswith(pre) for pre in exclude_prefixes) or any(tag in name for tag in adapter_low_rank_tags):
+                        params_muon_excluded.append(p)
+                    else:
+                        params_remaining.append(p)
+                pg_excluded = pg.copy()
+                pg_excluded['params'] = params_muon_excluded
+                # Force standard Adam for the excluded params: turn off all Muon variants.
+                pg_excluded['muon'] = False
+                pg_excluded['adamuon'] = False
+                pg_excluded['normuon'] = False
                 params_2d = []
                 params_other = []
-                for p in params:
+                for p in params_remaining:
                     if p.ndim == 2:
                         params_2d.append(p)
                     else:
@@ -768,6 +795,8 @@ if __name__ == '__main__':
                 pg_other = pg
                 pg_other['params'] = params_other
                 new_param_groups.append(pg_other)
+                if len(params_muon_excluded) > 0:
+                    new_param_groups.append(pg_excluded)
             param_groups = new_param_groups
         else:
             param_groups = model.get_param_groups(model_parameters)

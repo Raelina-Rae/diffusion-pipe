@@ -758,6 +758,17 @@ class SDXLPipeline(BasePipeline):
             text_encoder_2_param_group['lr'] = text_encoder_2_lr
         return [unet_param_group, text_encoder_param_group, text_encoder_2_param_group]
 
+    def get_muon_exclude_prefixes(self):
+        if 'adapter' in self.config:
+            return []
+        return [
+            'unet.conv_in.',
+            'unet.conv_out.',
+            'unet.conv_norm_out.',
+            'unet.time_embedding.',
+            'unet.add_embedding.',
+        ]
+
     def get_loss_fn(self):
         def loss_fn(output, label):
             output, timesteps = output
