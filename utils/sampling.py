@@ -8,6 +8,7 @@ import toml
 import torch
 import torchvision
 import imageio
+from tqdm.auto import tqdm
 from deepspeed.utils.logging import logger
 
 from utils.common import is_main_process, empty_cuda_cache
@@ -32,6 +33,7 @@ class SampleConfig:
     seed: int | None
     sampler: str
     prompts: list[SamplePrompt]
+    shift: float | None = None
 
 
 def _load_sample_cfg(sample_cfg_path: str | Path) -> SampleConfig:
@@ -57,6 +59,7 @@ def _load_sample_cfg(sample_cfg_path: str | Path) -> SampleConfig:
         seed=(int(raw["seed"]) if "seed" in raw and raw["seed"] is not None else None),
         sampler=str(raw.get("sampler", "euler")).lower(),
         prompts=prompts,
+        shift=(float(raw["shift"]) if raw.get("shift") is not None else None),
     )
 
 
@@ -555,6 +558,13 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
     latent_w = sample_cfg.width // 8
     latent_t = sample_cfg.frames
 
+    # Rectified-flow time shift for CosmosPredict2 / Anima sampling.
+    shift = sample_cfg.shift if sample_cfg.shift is not None else 3.0
+    logger.info(
+        f"Cosmos sampling: shift={shift}, steps={sample_cfg.num_inference_steps}, "
+        f"cfg={sample_cfg.guidance_scale}, frames={sample_cfg.frames}"
+    )
+
     dt = 1.0 / float(sample_cfg.num_inference_steps)
 
     sample_idx = 0
@@ -573,9 +583,18 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
             # padding mask: zeros (no padding) at pixel resolution H/W for prepare_embedded_sequence
             padding_mask = torch.zeros((1, 1, sample_cfg.height, sample_cfg.width), device=device, dtype=dtype)
 
-            for i in range(sample_cfg.num_inference_steps):
-                # integrate from t=1 -> 0
-                t = 1.0 - (i + 0.5) * dt
+            step_desc = f"sample step {step}" if step is not None else "sampling"
+            pbar = tqdm(
+                range(sample_cfg.num_inference_steps),
+                desc=step_desc,
+                leave=False,
+            )
+            for i in pbar:
+                # Integrate from t=1 -> 0 uniformly in shifted t-space, then map back to the
+                # unshifted schedule the model was trained on. This is the same time_shift
+                # transform used in `models/cosmos_predict2.py` training prepare_inputs.
+                tau = 1.0 - (i + 0.5) * dt
+                t = (tau * shift) / (1.0 + (shift - 1.0) * tau)
                 t_tensor = torch.full((1, 1), float(t), device=device, dtype=dtype)
 
                 v_pos = transformer(x, t_tensor, pos_emb, fps=None, padding_mask=padding_mask)
@@ -583,6 +602,9 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
 
                 v = v_neg + sample_cfg.guidance_scale * (v_pos - v_neg)
                 x = x - v * dt
+
+                pbar.set_postfix_str(f"t={t:.3f} cfg={sample_cfg.guidance_scale}")
+            pbar.close()
 
             latents = x
             decoded = vae_model.decode(latents, vae_scale).float().clamp_(-1, 1).squeeze(0)  # (C,T,H,W)
