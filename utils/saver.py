@@ -50,6 +50,7 @@ class Saver:
         self.config = config
         self.is_adapter = is_adapter
         self.save_root = Path(save_root)
+        self.models_dir = self.save_root / 'models'
         self.model = model
         self.train_dataloader = train_dataloader
         self.model_engine = model_engine
@@ -58,9 +59,12 @@ class Saver:
 
     def _format_save_name(self, name: str) -> str:
         if name.startswith('epoch'):
-            return f'{self.output_name}_e{name[5:]}'
+            num = int(name[5:])
+            return f'{self.output_name}-epoch{num:04d}'
         if name.startswith('step'):
-            return f'{self.output_name}_s{name[4:]}'
+            num = int(name[4:])
+            return f'{self.output_name}-step{num:08d}'
+        # Fallback for ad-hoc save names not starting with epoch/step.
         return f'{self.output_name}_{name}'
 
     def save_adapter(self, name):
@@ -93,15 +97,16 @@ class Saver:
             os.makedirs(out_dir, exist_ok=True)
             self.model.save_adapter(out_dir, state_dict)
             final_name = self._format_save_name(name)
+            os.makedirs(self.models_dir, exist_ok=True)
             for f in sorted(out_dir.glob('*.safetensors')):
-                dst = self.save_root / f'{final_name}.safetensors'
+                dst = self.models_dir / f'{final_name}.safetensors'
                 f.rename(dst)
                 if is_main_process():
                     print(f'Saved {dst}')
                 break
             for f in out_dir.iterdir():
                 if f.is_file() and f.suffix not in ('.py', '.toml'):
-                    dst = self.save_root / f.name
+                    dst = self.models_dir / f.name
                     if not dst.exists():
                         f.rename(dst)
             shutil.rmtree(out_dir)
@@ -128,15 +133,16 @@ class Saver:
             os.makedirs(out_dir, exist_ok=True)
             self.model.save_model(out_dir, state_dict)
             final_name = self._format_save_name(name)
+            os.makedirs(self.models_dir, exist_ok=True)
             for f in sorted(out_dir.glob('*.safetensors')):
-                dst = self.save_root / f'{final_name}.safetensors'
+                dst = self.models_dir / f'{final_name}.safetensors'
                 f.rename(dst)
                 if is_main_process():
                     print(f'Saved {dst}')
                 break
             for f in out_dir.iterdir():
                 if f.is_file() and f.suffix not in ('.py', '.toml'):
-                    dst = self.save_root / f.name
+                    dst = self.models_dir / f.name
                     if not dst.exists():
                         f.rename(dst)
             shutil.rmtree(out_dir)
