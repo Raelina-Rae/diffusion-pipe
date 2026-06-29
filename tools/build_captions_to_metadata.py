@@ -59,6 +59,25 @@ def _read_sidecar(path: Path) -> str | None:
     return path.read_text(encoding='utf-8-sig').strip() or None
 
 
+def _load_protected_tags(filepath: Path | None) -> set[str]:
+    """Load a set of protected tag strings from a file (one per line).
+
+    Lines starting with ``#`` are treated as comments and blank lines are
+    skipped.  Returns an empty set when *filepath* is ``None`` or missing.
+    """
+    if filepath is None:
+        return set()
+    if not filepath.is_file():
+        print(f'Warning: protected_tags_file not found: {filepath}', file=sys.stderr)
+        return set()
+    tags: set[str] = set()
+    for line in filepath.read_text(encoding='utf-8-sig').splitlines():
+        tag = line.strip()
+        if tag and not tag.startswith('#'):
+            tags.add(tag)
+    return tags
+
+
 def _per_image_rng(stem: str, base_seed: int | None, slot_index: int) -> random.Random:
     """Deterministic RNG scoped to one image + one dropout slot."""
     if base_seed is None:
@@ -75,22 +94,27 @@ def _apply_dropout(
     protect_n: int,
     delimiter: str,
     rng: random.Random,
+    protected_tags: set[str],
+    shuffle: bool,
 ) -> tuple[list[str], list[str]]:
-    """Split tags into (protected, kept_remainder) after applying dropout.
+    """Split tags into (anchor, kept_tail) after optional shuffle + dropout.
 
-    - The first ``protected_n_tags`` tags are always kept (protected).
-    - Each remaining tag is kept with probability ``1 - rate``.
+    - The first ``protect_n`` tags are always kept (anchor, never shuffled).
+    - Remaining tail tags are optionally shuffled, then each is kept if it is
+      in ``protected_tags`` or with probability ``1 - rate``.
     Returns two lists so callers can compose the final caption string freely.
     """
     tags = _split_tags(tags_text, delimiter)
     if not tags:
         return [], []
-    protected = tags[:protect_n]
-    remainder = tags[protect_n:]
-    if not remainder or rate <= 0.0:
-        return protected, remainder
-    kept = [t for t in remainder if rng.random() >= rate]
-    return protected, kept
+    anchor = tags[:protect_n]
+    tail = tags[protect_n:]
+    if shuffle and tail:
+        rng.shuffle(tail)
+    if not tail or rate <= 0.0:
+        return anchor, tail
+    kept = [t for t in tail if t in protected_tags or rng.random() >= rate]
+    return anchor, kept
 
 
 def _collect_media_files(
@@ -124,17 +148,22 @@ def _build_variants(
     delimiter: str,
     dropout_rate: float,
     protected_n_tags: int,
-    num_dropout: int,
+    protected_tags: set[str],
+    shuffle: bool,
+    num_augmentations: int,
     stem: str,
     dropout_seed: int | None,
+    caption_version: int,
 ) -> list[str]:
     variants: list[str] = []
 
-    # --- Base caption 0: full tags ---
-    if tags:
+    # --- Base caption 0 ---
+    if caption_version >= 2 and tags and nl:
+        variants.append(f'{tags}.\n{nl}')
+    elif tags:
         variants.append(tags)
 
-    # --- Base caption 1: first_n_tags + NL, or just NL ---
+    # --- Base caption 1: first_n_tags + nl, or just nl ---
     if nl:
         fn = None
         if first_n_tags is not None:
@@ -146,23 +175,30 @@ def _build_variants(
         else:
             variants.append(nl)
 
-    # --- Dropout captions ---
-    if num_dropout <= 0 or not tags or not nl:
+    # --- Augmentation captions (dropout) ---
+    if num_augmentations <= 0 or not tags or not nl:
         return variants
 
-    for slot_idx in range(num_dropout):
-        rng = _per_image_rng(stem, dropout_seed, slot_idx)
-        protected, kept_remainder = _apply_dropout(tags, dropout_rate, protected_n_tags, delimiter, rng)
-        all_kept = protected + kept_remainder
-        kept_str = _join_tags(all_kept, delimiter)
+    for aug_idx in range(num_augmentations):
+        # tags-first dropout variant
+        rng1 = _per_image_rng(stem, dropout_seed, 2 * aug_idx)
+        anchor1, kept1 = _apply_dropout(
+            tags, dropout_rate, protected_n_tags, delimiter, rng1,
+            protected_tags, shuffle,
+        )
+        dropout_tags1 = _join_tags(anchor1 + kept1, delimiter)
+        if dropout_tags1:
+            variants.append(f'{dropout_tags1}.\n{nl}')
 
-        if not kept_str:
-            continue
-
-        if slot_idx % 2 == 0:
-            variants.append(f'{kept_str}.\n{nl}')   # tags-first
-        else:
-            variants.append(f'{nl}\n{kept_str}')   # nl-first
+        # nl-first dropout variant
+        rng2 = _per_image_rng(stem, dropout_seed, 2 * aug_idx + 1)
+        anchor2, kept2 = _apply_dropout(
+            tags, dropout_rate, protected_n_tags, delimiter, rng2,
+            protected_tags, shuffle,
+        )
+        dropout_tags2 = _join_tags(anchor2 + kept2, delimiter)
+        if dropout_tags2:
+            variants.append(f'{nl}\n{dropout_tags2}')
 
     return variants
 
@@ -181,11 +217,14 @@ def build_captions_for_directory(
     delimiter: str,
     dropout_rate: float,
     protected_n_tags: int,
-    num_dropout: int,
+    protected_tags: set[str],
+    shuffle: bool,
+    num_augmentations: int,
     dropout_seed: int | None,
     include_videos: bool,
     require_nl: bool,
     require_tags: bool,
+    caption_version: int,
 ) -> tuple[dict[str, list[str]], list[str]]:
 
     tags_ext  = _norm_ext(tags_ext)
@@ -234,9 +273,12 @@ def build_captions_for_directory(
             delimiter=delimiter,
             dropout_rate=dropout_rate,
             protected_n_tags=protected_n_tags,
-            num_dropout=num_dropout,
+            protected_tags=protected_tags,
+            shuffle=shuffle,
+            num_augmentations=num_augmentations,
             stem=stem,
             dropout_seed=dropout_seed,
+            caption_version=caption_version,
         )
 
         if not variants:
@@ -289,16 +331,30 @@ def main() -> int:
     parser.add_argument('--delimiter', default=', ',
         help='Tag delimiter used for splitting and joining (default: ", ").')
 
-    # --- Dropout options ---
-    parser.add_argument('--num_dropout', type=int, default=0, metavar='N',
-        help='Number of additional dropout caption slots to generate (default: 0 = disabled). '
-             'Each slot uses an independent dropout mask applied to tags. '
-             'Slot order: tags-first, nl-first, tags-first, nl-first, ...')
+    # --- Caption format ---
+    parser.add_argument('--caption_version', type=int, default=2, choices=[1, 2],
+        help='Output caption format version (default: 2). '
+             'v1: base caption [0] is tags only. '
+             'v2: base caption [0] is tags + period + newline + nl.')
+
+    # --- Dropout / augmentation options ---
+    parser.add_argument('--num_augmentations', type=int, default=0, metavar='N',
+        help='Number of augmentation pairs to generate (default: 0 = disabled). '
+             'Each augmentation produces two dropout captions — tags-first and '
+             'nl-first — each with an independent dropout mask and optional tag shuffle.')
     parser.add_argument('--dropout_rate', type=float, default=0.3, metavar='RATE',
-        help='Per-tag dropout probability applied to tags after the protected prefix (default: 0.3). '
-             'Ignored when --num_dropout is 0.')
+        help='Per-tag dropout probability applied to tail tags after the protected prefix (default: 0.3). '
+             'Ignored when --num_augmentations is 0.')
     parser.add_argument('--protected_n_tags', type=int, default=8,
-        help='Number of leading tags that are never dropped during dropout (default: 8).')
+        help='Number of leading tags that are never dropped or shuffled during dropout (default: 8).')
+    parser.add_argument('--protected_tags_file', type=Path, default=None, metavar='PATH',
+        help='Path to a file listing tags (one per line) that are never dropped during dropout. '
+             'Lines starting with # are treated as comments. (default: disabled)')
+    parser.add_argument('--shuffle', action='store_true', default=True,
+        help='Shuffle non-protected tail tags before each dropout application (default: on). '
+             'Only affects augmentation/dropout variants.')
+    parser.add_argument('--no_shuffle', action='store_false', dest='shuffle',
+        help='Disable tag shuffling for dropout variants.')
     parser.add_argument('--dropout_seed', type=int, default=None,
         help='Base RNG seed for deterministic dropout (default: hash-based per image).')
 
@@ -327,16 +383,20 @@ def main() -> int:
     if not (0.0 <= args.dropout_rate <= 1.0):
         print('Error: --dropout_rate must be between 0.0 and 1.0', file=sys.stderr)
         return 1
-    if args.num_dropout < 0:
-        print('Error: --num_dropout must be >= 0', file=sys.stderr)
+    if args.num_augmentations < 0:
+        print('Error: --num_augmentations must be >= 0', file=sys.stderr)
         return 1
-    if args.num_dropout > 0 and args.dropout_rate <= 0.0:
-        print('Error: --dropout_rate must be > 0 when --num_dropout > 0', file=sys.stderr)
+    if args.num_augmentations > 0 and args.dropout_rate <= 0.0:
+        print('Error: --dropout_rate must be > 0 when --num_augmentations > 0', file=sys.stderr)
         return 1
 
     output = args.output or (args.input / 'captions.json')
 
     # --- Build ---
+    protected_tags = _load_protected_tags(args.protected_tags_file)
+    if protected_tags:
+        print(f'Loaded {len(protected_tags)} protected tags from {args.protected_tags_file}')
+
     built, warnings = build_captions_for_directory(
         root=args.input,
         sidecar_dir=args.sidecar_dir,
@@ -347,11 +407,14 @@ def main() -> int:
         delimiter=args.delimiter,
         dropout_rate=args.dropout_rate,
         protected_n_tags=args.protected_n_tags,
-        num_dropout=args.num_dropout,
+        protected_tags=protected_tags,
+        shuffle=args.shuffle,
+        num_augmentations=args.num_augmentations,
         dropout_seed=args.dropout_seed,
         include_videos=args.include_videos,
         require_nl=args.require_nl,
         require_tags=args.require_tags,
+        caption_version=args.caption_version,
     )
 
     # --- Merge ---
@@ -367,16 +430,25 @@ def main() -> int:
         final = built
 
     # --- Summary ---
-    base_slots = 2  # tags + first_n_nl
-    total_slots = base_slots + args.num_dropout
-    print(f'\nCaption layout per image:')
-    print(f'  [0] {{tags}}')
-    print(f'  [1] {{first_n_tags}}.\\n{{nl_caption}}')
-    for i in range(args.num_dropout):
-        slot = base_slots + i
-        kind = 'tags-first' if i % 2 == 0 else 'nl-first'
-        print(f'  [{slot}] dropout — {kind}')
-    print(f'  Total slots: {total_slots}  (dropout rate: {args.dropout_rate}, protected: {args.protected_n_tags})\n')
+    base_slots = 2  # tags(+nl), first_n_tags+nl
+    total_slots = base_slots + 2 * args.num_augmentations
+    print(f'\nCaption layout per image (v{args.caption_version}):')
+    if args.caption_version >= 2:
+        print(f'  [0] {{tags}}.\\n{{nl}}')
+    else:
+        print(f'  [0] {{tags}}')
+    print(f'  [1] {{first_n_tags}}.\\n{{nl}}')
+    for i in range(args.num_augmentations):
+        slot_tags = base_slots + 2 * i
+        slot_nl   = base_slots + 2 * i + 1
+        print(f'  [{slot_tags}] augmentation {i + 1} — dropout tags-first')
+        print(f'  [{slot_nl}] augmentation {i + 1} — dropout nl-first')
+    parts = [f'dropout rate: {args.dropout_rate}',
+             f'protected prefix: {args.protected_n_tags}',
+             f'shuffle: {args.shuffle}']
+    if protected_tags:
+        parts.append(f'protected tags: {len(protected_tags)}')
+    print(f'  Total slots: {total_slots}  ({", ".join(parts)})\n')
 
     data_keys   = [k for k in final if not k.startswith('__')]
     variant_counts = {len(final[k]) for k in data_keys}
@@ -414,7 +486,7 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, 'w', encoding='utf-8') as f:
         json.dump(final, f, ensure_ascii=False, indent=args.indent or None)
-    print(f'\nWrote → {output}')
+    print(f'\nWrote -> {output}')
     return 0
 
 
