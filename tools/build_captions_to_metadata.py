@@ -25,6 +25,8 @@ _VIDEO_SUFFIXES = {
     '.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v', '.wmv', '.flv',
 }
 
+_KEEP_TOKENS_SEPARATOR = '|||'
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,6 +53,31 @@ def _join_tags(tags: list[str], delimiter: str) -> str:
 def _first_n_from_tags(tags_text: str, n: int, delimiter: str) -> str:
     """Return the first N tags from a tag string."""
     return _join_tags(_split_tags(tags_text, delimiter)[:n], delimiter)
+
+
+def _process_keep_separator(
+    tags_text: str, separator: str, delimiter: str,
+) -> tuple[str, list[str], list[str]]:
+    """Process the keep_tokens separator in tags.
+
+    Returns ``(full_tags, keep_tags, rest_tags)`` where:
+    - ``full_tags`` — tags with the separator removed (original if absent)
+    - ``keep_tags`` — tags before the separator (empty list if absent)
+    - ``rest_tags`` — tags after the separator (all tags if absent)
+    """
+    if separator not in tags_text:
+        return tags_text, [], _split_tags(tags_text, delimiter)
+    parts = tags_text.split(separator)
+    # Strip stray commas at separator boundaries (e.g. "tag,||| tag2" -> "tag, tag2")
+    parts[0] = parts[0].strip().rstrip(',').strip()
+    for i in range(1, len(parts)):
+        parts[i] = parts[i].strip().lstrip(',').strip()
+    keep_tags = _split_tags(parts[0], delimiter)
+    rest_tags: list[str] = []
+    for part in parts[1:]:
+        rest_tags.extend(_split_tags(part, delimiter))
+    full_tags = _join_tags(keep_tags + rest_tags, delimiter)
+    return full_tags, keep_tags, rest_tags
 
 
 def _read_sidecar(path: Path) -> str | None:
@@ -99,16 +126,26 @@ def _apply_dropout(
 ) -> tuple[list[str], list[str]]:
     """Split tags into (anchor, kept_tail) after optional shuffle + dropout.
 
-    - The first ``protect_n`` tags are always kept (anchor, never shuffled).
-    - Remaining tail tags are optionally shuffled, then each is kept if it is
-      in ``protected_tags`` or with probability ``1 - rate``.
-    Returns two lists so callers can compose the final caption string freely.
+    When ``protect_n`` is 0 and the keep_tokens separator (``|||``) is present,
+    the separator splits tags into anchor (before) and tail (after).  Otherwise
+    the first ``protect_n`` tags are the anchor (separator removed if present)
+    and the rest is the tail.  Tail tags are optionally shuffled, then each is
+    kept if it is in ``protected_tags`` or with probability ``1 - rate``.
     """
-    tags = _split_tags(tags_text, delimiter)
-    if not tags:
+    full_tags, keep_tags, rest_tags = _process_keep_separator(
+        tags_text, _KEEP_TOKENS_SEPARATOR, delimiter,
+    )
+
+    if protect_n == 0 and keep_tags:
+        anchor = keep_tags
+        tail = rest_tags
+    else:
+        all_tags = keep_tags + rest_tags
+        anchor = all_tags[:protect_n]
+        tail = all_tags[protect_n:]
+
+    if not anchor and not tail:
         return [], []
-    anchor = tags[:protect_n]
-    tail = tags[protect_n:]
     if shuffle and tail:
         rng.shuffle(tail)
     if not tail or rate <= 0.0:
@@ -157,11 +194,16 @@ def _build_variants(
 ) -> list[str]:
     variants: list[str] = []
 
+    # Process keep_tokens separator (|||)
+    full_tags, keep_tags, rest_tags = _process_keep_separator(
+        tags, _KEEP_TOKENS_SEPARATOR, delimiter,
+    )
+
     # --- Base caption 0 ---
-    if caption_version >= 2 and tags and nl:
-        variants.append(f'{tags}.\n{nl}')
-    elif tags:
-        variants.append(tags)
+    if caption_version >= 2 and full_tags and nl:
+        variants.append(f'{full_tags}.\n{nl}')
+    elif full_tags:
+        variants.append(full_tags)
 
     # --- Base caption 1: first_n_tags + nl, or just nl ---
     if nl:
@@ -169,14 +211,16 @@ def _build_variants(
         if first_n_tags is not None:
             fn = first_n_tags
         elif first_n_count > 0:
-            fn = _first_n_from_tags(tags, first_n_count, delimiter)
+            fn = _first_n_from_tags(full_tags, first_n_count, delimiter)
+        elif keep_tags:
+            fn = _join_tags(keep_tags, delimiter)
         if fn:
             variants.append(f'{fn}.\n{nl}')
         else:
             variants.append(nl)
 
     # --- Augmentation captions (dropout) ---
-    if num_augmentations <= 0 or not tags or not nl:
+    if num_augmentations <= 0 or not full_tags or not nl:
         return variants
 
     for aug_idx in range(num_augmentations):
@@ -345,8 +389,8 @@ def main() -> int:
     parser.add_argument('--dropout_rate', type=float, default=0.3, metavar='RATE',
         help='Per-tag dropout probability applied to tail tags after the protected prefix (default: 0.3). '
              'Ignored when --num_augmentations is 0.')
-    parser.add_argument('--protected_n_tags', type=int, default=8,
-        help='Number of leading tags that are never dropped or shuffled during dropout (default: 8).')
+    parser.add_argument('--protected_n_tags', type=int, default=0,
+        help='Number of leading tags that are never dropped or shuffled during dropout (default: 0 = auto-detect keep_tokens separator ||| in tags; if absent, all tags subject to dropout).')
     parser.add_argument('--protected_tags_file', type=Path, default=None, metavar='PATH',
         help='Path to a file listing tags (one per line) that are never dropped during dropout. '
              'Lines starting with # are treated as comments. (default: disabled)')
