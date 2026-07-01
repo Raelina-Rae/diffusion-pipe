@@ -559,7 +559,7 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
     latent_t = sample_cfg.frames
 
     # Rectified-flow time shift for CosmosPredict2 / Anima sampling.
-    shift = sample_cfg.shift if sample_cfg.shift is not None else 3.0
+    shift = sample_cfg.shift
     logger.info(
         f"Cosmos sampling: shift={shift}, steps={sample_cfg.num_inference_steps}, "
         f"cfg={sample_cfg.guidance_scale}, frames={sample_cfg.frames}"
@@ -590,11 +590,12 @@ def _sample_cosmos_predict2_in_memory(model: Any, sample_cfg: SampleConfig, out_
                 leave=False,
             )
             for i in pbar:
-                # Integrate from t=1 -> 0 uniformly in shifted t-space, then map back to the
-                # unshifted schedule the model was trained on. This is the same time_shift
-                # transform used in `models/cosmos_predict2.py` training prepare_inputs.
-                tau = 1.0 - (i + 0.5) * dt
-                t = (tau * shift) / (1.0 + (shift - 1.0) * tau)
+                # Integrate from t=1 -> 0. When shift is set, map the uniform grid
+                # through the same time_shift transform used in training so the
+                # schedule matches what the model was trained on.
+                t = 1.0 - (i + 0.5) * dt
+                if shift is not None:
+                    t = (t * shift) / (1.0 + (shift - 1.0) * t)
                 t_tensor = torch.full((1, 1), float(t), device=device, dtype=dtype)
 
                 v_pos = transformer(x, t_tensor, pos_emb, fps=None, padding_mask=padding_mask)

@@ -90,9 +90,8 @@ def convert_lokr_state_dict_to_lycoris(state_dict, adapter_config=None, default_
             new_state_dict[key] = tensor
 
     if alpha_value is not None:
-        alpha_tensor = torch.tensor(float(alpha_value))
         for module_path in converted_module_paths:
-            new_state_dict[f'{module_path}.alpha'] = alpha_tensor
+            new_state_dict[f'{module_path}.alpha'] = torch.tensor(float(alpha_value))
 
     return new_state_dict
 
