@@ -262,7 +262,7 @@ dtype = 'bfloat16'
 #transformer_dtype = 'float8_e5m2'
 ```
 
-Cosmos-Predict2 supports LoRA and full fine tuning. Currently only for the t2i model variants.
+Cosmos-Predict2 supports LoRA, LoKR, and full fine tuning. Currently only for the t2i model variants. LoKR is backed by the `peft` library (`peft.LoKrConfig`); use the `[adapter]` block with `type = 'lokr'`. Available options: `rank` (required; `alpha` is forced to equal `rank`), `factor` (Kronecker decomposition factor, -1 = auto), `decompose_both` (decompose w1 AND w2 into low-rank), `use_tucker` (Tucker decomposition for Conv2d, needs `include_conv`), `include_conv` (also target `nn.Conv2d` layers, same rank/alpha), `rank_dropout`, `module_dropout`, `rank_dropout_scale`. See `examples/sdxl_lokr_example.toml` and `examples/anima_lokr_example.toml` for full annotated configs.
 
 Set transformer_path to the original model checkpoint, vae_path to the ComfyUI Wan VAE, and t5_path to the ComfyUI [old T5 model file](https://huggingface.co/comfyanonymous/cosmos_1.0_text_encoder_and_VAE_ComfyUI/blob/main/text_encoders/oldt5_xxl_fp16.safetensors). Please note this is the OLDER version of T5, not the one that is more commonly used with other models.
 
@@ -561,7 +561,7 @@ Notes:
   - The underlying model is still training and it will diverge from the preview weights.
   - If you are uploading the lora somewhere, specify that it is trained on preview, so that users aren't confused if it doesn't work well on the final version.
 
-Anima LoRAs are saved in ComfyUI format.
+Anima LoRAs (and LoKRs) are saved in ComfyUI/LyCORIS format.
 
 
 ## Ernie-Image

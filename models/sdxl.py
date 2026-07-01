@@ -12,9 +12,9 @@ import peft
 import safetensors
 from safetensors.torch import save_file
 
-from models.base import BasePipeline, make_contiguous
+from models.base import BasePipeline, make_contiguous, _make_peft_lokr_config
 from utils.common import AUTOCAST_DTYPE, is_main_process
-from utils.lokr import LoKrModule, apply_lokr_to_model, get_lokr_state_dict, load_lokr_state_dict, convert_lokr_state_dict_to_lycoris
+from utils.lokr import load_lokr_state_dict, convert_lokr_state_dict_to_lycoris
 
 
 
@@ -488,6 +488,7 @@ class SDXLPipeline(BasePipeline):
         return []
 
     def configure_adapter(self, adapter_config):
+        self.adapter_config = adapter_config
         adapter_type = adapter_config['type']
         if adapter_type == 'lora' and 'init_from_existing' in adapter_config:
             # For LoRA, load_adapter_weights() both creates the LoRA and loads its weights.
@@ -521,20 +522,21 @@ class SDXLPipeline(BasePipeline):
                 if p.requires_grad:
                     p.data = p.data.to(adapter_config['dtype'])
         elif adapter_type == 'lokr':
+            include_conv = adapter_config.get('include_conv', False)
+            target_module_names = []
             for target_module in target_modules:
-                apply_lokr_to_model(
-                    target_module, adapter_config,
-                    target_module_classes=None,
-                )
+                for name, submodule in target_module.named_modules():
+                    if isinstance(submodule, nn.Linear):
+                        target_module_names.append(name)
+                    elif include_conv and isinstance(submodule, nn.Conv2d):
+                        target_module_names.append(name)
 
+            peft_config = _make_peft_lokr_config(adapter_config, target_module_names)
+            top_level_module.add_adapter(peft_config)
             for name, p in top_level_module.named_parameters():
-                if any(kw in name for kw in ['lokr_w', 'lokr_t']):
-                    p.original_name = state_dict_key_prefix + name
+                p.original_name = state_dict_key_prefix + name
+                if p.requires_grad:
                     p.data = p.data.to(adapter_config['dtype'])
-
-            for name, buf in top_level_module.named_buffers():
-                if name.endswith('.alpha'):
-                    buf.original_name = state_dict_key_prefix + name
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 
@@ -547,7 +549,7 @@ class SDXLPipeline(BasePipeline):
             kohya_sd = diffusers.utils.state_dict_utils.convert_state_dict_to_kohya(state_dict)
             safetensors.torch.save_file(kohya_sd, save_dir / 'lora.safetensors', metadata={'format': 'pt'})
         elif adapter_type == 'lokr':
-            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict)
+            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict, self.adapter_config)
             safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')

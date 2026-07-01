@@ -32,7 +32,7 @@ from models.wan.vae2_1 import WanVAE_
 
 KEEP_IN_HIGH_PRECISION = ['x_embedder', 't_embedder', 't_embedding_norm', 'final_layer']
 
-MUON_EXCLUDE_PREFIXES = ['x_embedder.', 'final_layer.']
+MUON_EXCLUDE_PREFIXES = ['t_embedder.', 'final_layer.']
 
 MULTISCALE_LOSS_THRESHOLDS = [size * 0.9 for size in [1024]]
 MULTISCALE_LOSS_THRESHOLDS.sort()
@@ -322,7 +322,7 @@ class CosmosPredict2Pipeline(BasePipeline):
 
     def save_adapter(self, save_dir, state_dict):
         if any('.lokr_w' in k for k in state_dict):
-            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict)
+            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict, self.adapter_config)
             safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
         else:
             self.peft_config.save_pretrained(save_dir)

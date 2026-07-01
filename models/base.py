@@ -18,7 +18,7 @@ from torchvision import transforms
 import imageio
 
 from utils.common import is_main_process, VIDEO_EXTENSIONS, round_to_nearest_multiple, round_down_to_multiple
-from utils.lokr import LoKrModule, apply_lokr_to_model, get_lokr_state_dict, load_lokr_state_dict, convert_lokr_state_dict_to_lycoris
+from utils.lokr import load_lokr_state_dict, convert_lokr_state_dict_to_lycoris
 import comfy.utils
 import comfy.sd
 import comfy.sd1_clip
@@ -30,6 +30,55 @@ model_management.in_training = True
 
 def make_contiguous(*tensors):
     return tuple(x.contiguous() for x in tensors)
+
+
+def _collect_target_linear_modules(model, target_module_classes):
+    target_linear_modules = set()
+    for name, module in model.named_modules():
+        if target_module_classes and module.__class__.__name__ not in target_module_classes:
+            continue
+        for full_submodule_name, submodule in module.named_modules(prefix=name):
+            if isinstance(submodule, nn.Linear):
+                target_linear_modules.add(full_submodule_name)
+    return list(target_linear_modules)
+
+
+def _collect_target_modules(model, target_module_classes, include_conv=False):
+    target_modules = set()
+    for name, module in model.named_modules():
+        if target_module_classes and module.__class__.__name__ not in target_module_classes:
+            continue
+        for full_submodule_name, submodule in module.named_modules(prefix=name):
+            if isinstance(submodule, nn.Linear):
+                target_modules.add(full_submodule_name)
+            elif include_conv and isinstance(submodule, nn.Conv2d):
+                target_modules.add(full_submodule_name)
+    return list(target_modules)
+
+
+def _make_peft_lokr_config(adapter_config, target_modules):
+    if adapter_config.get('conv_rank', None) is not None or adapter_config.get('conv_alpha', None) is not None:
+        raise NotImplementedError(
+            'conv_rank/conv_alpha are not supported by the PEFT LoKR migration. The PEFT LoKrConfig applies '
+            'the same rank/alpha to Conv layers as Linear layers. Remove conv_rank/conv_alpha from the config.'
+        )
+    if adapter_config.get('dropout', 0.0):
+        raise NotImplementedError(
+            'dropout on the Kronecker diff is not exposed by peft.LoKrConfig. Remove `dropout` from the adapter '
+            'config or set it to 0 (use rank_dropout/module_dropout for LoKR-style regularization instead).'
+        )
+    return peft.LoKrConfig(
+        r=adapter_config['rank'],
+        alpha=adapter_config['alpha'],
+        rank_dropout=adapter_config.get('rank_dropout', 0.0) or 0.0,
+        module_dropout=adapter_config.get('module_dropout', 0.0) or 0.0,
+        rank_dropout_scale=adapter_config.get('rank_dropout_scale', False),
+        decompose_both=adapter_config.get('decompose_both', False),
+        decompose_factor=adapter_config.get('factor', -1),
+        use_effective_conv2d=adapter_config.get('use_tucker', False),
+        init_weights='lycoris',
+        target_modules=target_modules,
+    )
 
 
 def extract_clips(video, target_frames, video_clip_mode):
@@ -206,23 +255,25 @@ class BasePipeline:
                 if p.requires_grad:
                     p.data = p.data.to(adapter_config['dtype'])
         elif adapter_type == 'lokr':
-            apply_lokr_to_model(
-                self.transformer, adapter_config,
-                target_module_classes=self.adapter_target_modules,
+            target_modules = _collect_target_modules(
+                self.transformer, self.adapter_target_modules,
+                include_conv=adapter_config.get('include_conv', False),
             )
+            peft_config = _make_peft_lokr_config(adapter_config, target_modules)
+            self.peft_config = peft_config
+            self.lora_model = peft.get_peft_model(self.transformer, peft_config)
+            if is_main_process():
+                self.lora_model.print_trainable_parameters()
             for name, p in self.transformer.named_parameters():
-                if any(kw in name for kw in ['lokr_w', 'lokr_t']):
-                    p.original_name = name
+                p.original_name = name
+                if p.requires_grad:
                     p.data = p.data.to(adapter_config['dtype'])
-            for name, buf in self.transformer.named_buffers():
-                if name.endswith('.alpha'):
-                    buf.original_name = name
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 
     def save_adapter(self, save_dir, state_dict):
         if any('.lokr_w' in k for k in state_dict):
-            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict)
+            lycoris_sd = convert_lokr_state_dict_to_lycoris(state_dict, self.adapter_config)
             safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
             return
         raise NotImplementedError()
@@ -522,23 +573,25 @@ class ComfyPipeline:
                 if p.requires_grad:
                     p.data = p.data.to(adapter_config['dtype'])
         elif adapter_type == 'lokr':
-            apply_lokr_to_model(
-                self.diffusion_model, adapter_config,
-                target_module_classes=self.adapter_target_modules,
+            target_modules = _collect_target_modules(
+                self.diffusion_model, self.adapter_target_modules,
+                include_conv=adapter_config.get('include_conv', False),
             )
+            peft_config = _make_peft_lokr_config(adapter_config, target_modules)
+            self.peft_config = peft_config
+            self.lora_model = peft.get_peft_model(self.diffusion_model, peft_config)
+            if is_main_process():
+                self.lora_model.print_trainable_parameters()
             for name, p in self.diffusion_model.named_parameters():
-                if any(kw in name for kw in ['lokr_w', 'lokr_t']):
-                    p.original_name = name
+                p.original_name = name
+                if p.requires_grad:
                     p.data = p.data.to(adapter_config['dtype'])
-            for name, buf in self.diffusion_model.named_buffers():
-                if name.endswith('.alpha'):
-                    buf.original_name = name
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
 
     def save_adapter(self, save_dir, sd):
         if any('.lokr_w' in k for k in sd):
-            lycoris_sd = convert_lokr_state_dict_to_lycoris(sd)
+            lycoris_sd = convert_lokr_state_dict_to_lycoris(sd, self.adapter_config)
             safetensors.torch.save_file(lycoris_sd, save_dir / 'lokr.safetensors', metadata={'format': 'pt'})
         else:
             self.peft_config.save_pretrained(save_dir)
