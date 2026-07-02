@@ -466,6 +466,11 @@ class GenericOptim(Optimizer):
                 if automagic_lr is not None:
                     numerator.mul_(automagic_lr)
 
+                # Reshape numerator back to p's original shape (e.g. for 4D conv filters
+                # that were flattened to 2D for Newton-Schulz orthogonalization).
+                if numerator.shape != p.shape:
+                    numerator = numerator.view_as(p)
+
                 update = torch.zeros_like(p)
 
                 # step

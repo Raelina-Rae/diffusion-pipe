@@ -723,7 +723,8 @@ if __name__ == '__main__':
                 kwargs['momentum'] = kwargs['momentum'] ** (1/gas)
 
             optimizer_dict = {}
-            exclude_prefixes = model.get_muon_exclude_prefixes()
+            # Honor a top-level `muon_exclude_prefixes` override (same as the non-GR path).
+            exclude_prefixes = config.get('muon_exclude_prefixes', model.get_muon_exclude_prefixes())
             adapter_low_rank_tags = ('lokr_w', 'lokr_t', 'lora_A', 'lora_B')
             for pg in model.get_param_groups(model_parameters):
                 if isinstance(pg, dict):
@@ -754,7 +755,11 @@ if __name__ == '__main__':
         elif optim_type_lower == 'genericoptim':
             kwargs['compile'] = config['compile']
             kwargs['mpu'] = pipeline_model.mpu()
-            exclude_prefixes = model.get_muon_exclude_prefixes()
+            # User can override the model's default exclusion list via top-level config key
+            # `muon_exclude_prefixes`. Set to [] to disable exclusion entirely (e.g. for SDXL
+            # where conv_in/conv_out are conv layers, not embedding/LM-head matrices, and the
+            # MMDiT-based "exclude first/last linear" intuition is weaker).
+            exclude_prefixes = config.get('muon_exclude_prefixes', model.get_muon_exclude_prefixes())
             adapter_low_rank_tags = ('lokr_w', 'lokr_t', 'lora_A', 'lora_B')
             new_param_groups = []
             param_groups = model.get_param_groups(model_parameters)

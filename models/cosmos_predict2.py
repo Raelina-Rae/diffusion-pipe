@@ -32,8 +32,6 @@ from models.wan.vae2_1 import WanVAE_
 
 KEEP_IN_HIGH_PRECISION = ['x_embedder', 't_embedder', 't_embedding_norm', 'final_layer']
 
-MUON_EXCLUDE_PREFIXES = ['t_embedder.', 'final_layer.']
-
 MULTISCALE_LOSS_THRESHOLDS = [size * 0.9 for size in [1024]]
 MULTISCALE_LOSS_THRESHOLDS.sort()
 
@@ -504,9 +502,6 @@ class CosmosPredict2Pipeline(BasePipeline):
                 param_groups.append({'params': params, 'lr': lr})
 
         return param_groups
-
-    def get_muon_exclude_prefixes(self):
-        return MUON_EXCLUDE_PREFIXES
 
     def get_loss_fn(self):
         contrastive_lambda = self.contrastive_flow_lambda
