@@ -100,6 +100,9 @@ def set_config_defaults(config):
     if config['activation_checkpointing'] == 'unsloth':
         config['reentrant_activation_checkpointing'] = True
     config.setdefault('warmup_steps', 0)
+    config.setdefault('wsd_warmup_fraction', 0.01)
+    config.setdefault('wsd_decay_fraction', 0.10)
+    config.setdefault('wsd_eta_min', 0.0)
     if 'save_dtype' in config:
         config['save_dtype'] = DTYPE_MAP[config['save_dtype']]
     config.setdefault('output_name', 'model')
@@ -867,15 +870,40 @@ if __name__ == '__main__':
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
 
     scheduler_type = config.get('lr_scheduler', 'constant')
+    total_steps = config['max_steps'] if 'max_steps' in config else config['epochs'] * steps_per_epoch
     if scheduler_type == 'constant':
         lr_scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
     elif scheduler_type == 'linear':
-        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=config['epochs'] * steps_per_epoch)
+        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=total_steps)
     elif scheduler_type == 'cosine':
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'] * steps_per_epoch, eta_min=1e-6)
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+    elif scheduler_type == 'wsd':
+        warmup_steps = config.get('wsd_warmup_fraction', 0.01) * total_steps
+        decay_steps = config.get('wsd_decay_fraction', 0.10) * total_steps
+        warmup_steps = int(round(warmup_steps))
+        decay_steps = int(round(decay_steps))
+        stable_steps = max(0, int(total_steps) - warmup_steps - decay_steps)
+        eta_min = config.get('wsd_eta_min', 0.0)
+        if is_main_process():
+            print(f'WSD schedule: total_steps={int(total_steps)}, warmup={warmup_steps}, '
+                  f'stable={stable_steps}, decay={decay_steps}, eta_min={eta_min}')
+        schedulers = []
+        milestones = []
+        if warmup_steps > 0:
+            schedulers.append(torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0 / max(warmup_steps, 1), end_factor=1.0, total_iters=warmup_steps))
+            milestones.append(warmup_steps)
+        if stable_steps > 0:
+            schedulers.append(torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0))
+            milestones.append(milestones[-1] + stable_steps if milestones else stable_steps)
+        if decay_steps > 0:
+            schedulers.append(torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=decay_steps, eta_min=eta_min))
+        if len(schedulers) == 1:
+            lr_scheduler = schedulers[0]
+        else:
+            lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=schedulers, milestones=milestones)
     else:
-        raise NotImplementedError(f'Unknown lr_scheduler: {scheduler_type}')
-    if config['warmup_steps'] > 0:
+        raise NotImplementedError(f'Unknown lr_scheduler: {scheduler_type!r}. Valid values: "constant", "linear", "cosine", "wsd".')
+    if config['warmup_steps'] > 0 and scheduler_type != 'wsd':
         warmup_steps = config['warmup_steps']
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1/warmup_steps, total_iters=warmup_steps)
         lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, lr_scheduler], milestones=[warmup_steps])

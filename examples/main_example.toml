@@ -26,13 +26,24 @@ pipeline_stages = 1
 gradient_accumulation_steps = 1
 # Grad norm clipping.
 gradient_clipping = 1.0
-# Learning rate warmup.
+# Learning rate warmup. Applied for the constant/linear/cosine schedulers only.
+# The WSD scheduler has its own warmup controlled by wsd_warmup_fraction below.
 warmup_steps = 100
 # Force the learning rate to be this value, regardless of what the optimizer or anything else says.
 # Can be used to change learning rate even when resuming from checkpoint.
 #force_constant_lr = 1e-5
-# Can be 'constant' or 'linear'. If unset, will default to 'constant', i.e. no LR scheduler.
+# Can be 'constant', 'linear', 'cosine', or 'wsd' (warmup-stable-decay).
+# If unset, will default to 'constant', i.e. no LR scheduler.
 #lr_scheduler = 'linear'
+# WSD-specific knobs (only used when lr_scheduler = 'wsd'):
+# Fraction of total_steps used for the linear warmup from ~0 to peak LR.
+#wsd_warmup_fraction = 0.01
+# Fraction of total_steps used for the cosine decay from peak LR to wsd_eta_min.
+# The remaining (1 - warmup_fraction - decay_fraction) is the stable phase at peak LR.
+#wsd_decay_fraction = 0.10
+# Minimum LR at the end of the decay phase. 0 is typical; a small positive value
+# (e.g. 1e-6) is equivalent to the cosine scheduler's eta_min.
+#wsd_eta_min = 0.0
 
 # Block swapping is supported for Wan, HunyuanVideo, Flux, and Chroma. This value controls the number
 # of blocks kept offloaded to RAM. Increasing it lowers VRAM use, but has a performance penalty. The
