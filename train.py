@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import wandb
 from datetime import datetime, timezone
@@ -56,6 +57,50 @@ parser.add_argument('--master_port', type=int, default=29500, help='Master port 
 parser.add_argument('--dump_dataset', type=Path, default=None, help='Decode cached latents and dump the dataset to this directory.')
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
+
+
+class WSDLRScheduler(torch.optim.lr_scheduler.LRScheduler):
+    def __init__(self, optimizer, total_steps, warmup_fraction=0.01,
+                 decay_fraction=0.10, eta_min=0.0, last_epoch=-1):
+        self.total_steps = max(int(total_steps), 1)
+        self.warmup_steps = int(round(warmup_fraction * self.total_steps))
+        self.decay_steps = int(round(decay_fraction * self.total_steps))
+        self.stable_steps = max(0, self.total_steps - self.warmup_steps - self.decay_steps)
+        self.eta_min = float(eta_min)
+        # Snapshot the initial LR of every param group at construction time.
+        # Frozen groups have lr == 0 here and stay at 0 for the entire run.
+        self._initial_lrs = [group['lr'] for group in optimizer.param_groups]
+        super().__init__(optimizer, last_epoch=last_epoch)
+
+    def get_lr(self):
+        step = self.last_epoch  # 0-indexed; bumped by step() before this is called
+        lrs = []
+        for base_lr in self._initial_lrs:
+            if base_lr == 0.0:
+                # Frozen group: keep at 0 regardless of phase
+                lrs.append(0.0)
+                continue
+            if self.warmup_steps > 0 and step < self.warmup_steps:
+                # Linear warmup: factor ramps from 1/warmup_steps to 1.0
+                denom = max(self.warmup_steps, 1)
+                start_factor = 1.0 / denom
+                factor = start_factor + (1.0 - start_factor) * (step / denom)
+            elif step < self.warmup_steps + self.stable_steps:
+                # Stable at peak
+                factor = 1.0
+            else:
+                # Cosine decay from base_lr down to eta_min
+                if self.decay_steps > 0:
+                    decay_step = step - self.warmup_steps - self.stable_steps
+                    progress = min(max(decay_step, 0) / self.decay_steps, 1.0)
+                    cos_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+                    # lr = eta_min + (base_lr - eta_min) * cos_factor
+                    # factor = lr / base_lr, expressed in terms of base_lr
+                    factor = (self.eta_min + (base_lr - self.eta_min) * cos_factor) / base_lr
+                else:
+                    factor = 1.0
+            lrs.append(base_lr * factor)
+        return lrs
 
 
 class DummyOptimizer(torch.optim.Optimizer):
@@ -878,29 +923,22 @@ if __name__ == '__main__':
     elif scheduler_type == 'cosine':
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
     elif scheduler_type == 'wsd':
-        warmup_steps = config.get('wsd_warmup_fraction', 0.01) * total_steps
-        decay_steps = config.get('wsd_decay_fraction', 0.10) * total_steps
-        warmup_steps = int(round(warmup_steps))
-        decay_steps = int(round(decay_steps))
-        stable_steps = max(0, int(total_steps) - warmup_steps - decay_steps)
+        warmup_fraction = config.get('wsd_warmup_fraction', 0.01)
+        decay_fraction = config.get('wsd_decay_fraction', 0.10)
         eta_min = config.get('wsd_eta_min', 0.0)
         if is_main_process():
+            warmup_steps = int(round(warmup_fraction * total_steps))
+            decay_steps = int(round(decay_fraction * total_steps))
+            stable_steps = max(0, int(total_steps) - warmup_steps - decay_steps)
             print(f'WSD schedule: total_steps={int(total_steps)}, warmup={warmup_steps}, '
                   f'stable={stable_steps}, decay={decay_steps}, eta_min={eta_min}')
-        schedulers = []
-        milestones = []
-        if warmup_steps > 0:
-            schedulers.append(torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0 / max(warmup_steps, 1), end_factor=1.0, total_iters=warmup_steps))
-            milestones.append(warmup_steps)
-        if stable_steps > 0:
-            schedulers.append(torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0))
-            milestones.append(milestones[-1] + stable_steps if milestones else stable_steps)
-        if decay_steps > 0:
-            schedulers.append(torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=decay_steps, eta_min=eta_min))
-        if len(schedulers) == 1:
-            lr_scheduler = schedulers[0]
-        else:
-            lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=schedulers, milestones=milestones)
+        lr_scheduler = WSDLRScheduler(
+            optimizer,
+            total_steps=total_steps,
+            warmup_fraction=warmup_fraction,
+            decay_fraction=decay_fraction,
+            eta_min=eta_min,
+        )
     else:
         raise NotImplementedError(f'Unknown lr_scheduler: {scheduler_type!r}. Valid values: "constant", "linear", "cosine", "wsd".')
     if config['warmup_steps'] > 0 and scheduler_type != 'wsd':
