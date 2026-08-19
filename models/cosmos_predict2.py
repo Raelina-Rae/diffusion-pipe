@@ -135,6 +135,12 @@ def get_dit_config(state_dict, key_prefix=''):
         dit_config["num_blocks"] = 20
         dit_config["num_heads"] = 20
 
+    # Detect the actual number of blocks from the checkpoint (e.g. Anima 2.9B has 40 blocks instead of 28).
+    block_prefix = '{}blocks.'.format(key_prefix)
+    block_indices = [int(k[len(block_prefix):].split('.')[0]) for k in state_dict if k.startswith(block_prefix)]
+    if block_indices:
+        dit_config["num_blocks"] = max(block_indices) + 1
+
     if dit_config["in_channels"] == 16:
         dit_config["extra_per_block_abs_pos_emb"] = False
         dit_config["rope_h_extrapolation_ratio"] = 4.0

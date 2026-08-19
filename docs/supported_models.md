@@ -551,6 +551,8 @@ llm_adapter_lr = 0
 
 Use the official [ComfyUI format model files](https://huggingface.co/circlestone-labs/Anima).
 
+Both the 2B (28 blocks) and 2.9B (40 blocks) Anima models are supported. The block count is detected automatically from the checkpoint.
+
 Notes:
 - Might need to use lower learning rate than other models.
 - You can control the llm_adapter learning rate separately. This is an adapter that processes the Qwen3 embeddings before feeding into the diffusion model.
