@@ -58,9 +58,15 @@ frame_buckets = [1, 33]
 # Use 'captions.json' instead of '.txt' files for captions. The 'captions.json' file must be placed in the same directory as the image files
 # online_captions = true
 
+# Extension of the caption files. Defaults to '.txt'. The caption files should match the media file name,
+# but with this extension (e.g. image1.jpg -> image1.caption).
+# Can also be set per [[directory]] entry.
+# caption_extension = '.caption'
+
 [[directory]]
-# Path to directory of images/videos, and corresponding caption files. The caption files should match the media file name, but with a .txt extension.
-# A missing caption file will log a warning, but then just train using an empty caption.
+# Path to directory of images/videos, and corresponding caption files. The caption files should match the media file name, but with the
+# caption extension ('.txt' by default, see caption_extension above). A missing caption file will log a warning, but then just train using
+# an empty caption.
 path = '/home/anon/data/images/grayscale'
 
 # You can do masked training, where the mask indicates which parts of the image to train on. The masking is done in the loss function. The mask directory should have mask

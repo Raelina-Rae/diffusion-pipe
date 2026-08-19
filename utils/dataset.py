@@ -564,6 +564,7 @@ class DirectoryDataset:
         self.cache_dir = self.path / 'cache' / self.model_name
         self.grouping_keys_json_file = self.cache_dir / 'metadata/grouping_keys.json'
         self.skip_empty_caption = directory_config.get('skip_empty_caption', dataset_config.get('skip_empty_caption', True))
+        self.caption_extension = directory_config.get('caption_extension', dataset_config.get('caption_extension', '.txt'))
 
         if not self.path.exists() or not self.path.is_dir():
             raise RuntimeError(f'Invalid path: {self.path}')
@@ -732,11 +733,11 @@ class DirectoryDataset:
             mask_files = []
             control_files = []
             for file in tqdm(files):
-                if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet' or file.suffix == '.bak':
+                if not file.is_file() or file.suffix == self.caption_extension or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet' or file.suffix == '.bak':
                     continue
                 for image_spec in process_file(file):
                     image_file = Path(image_spec[1])
-                    caption_file = image_file.with_suffix('.txt')
+                    caption_file = image_file.with_suffix(self.caption_extension)
                     if has_captions_json or not os.path.exists(caption_file):
                         caption_file = ''
                     image_specs.append(image_spec)
