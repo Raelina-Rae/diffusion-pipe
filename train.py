@@ -699,6 +699,22 @@ if __name__ == '__main__':
         args = []
         kwargs = {k: v for k, v in optim_config.items() if k not in ['type', 'gradient_release']}
 
+        # When muon_lr is absent, the trainer's default Moonlight RMS-matched
+        # scaling is used instead (lr is in AdamW units).
+        muon_lr = kwargs.pop('muon_lr', None)
+        muon_lr_scale = kwargs.pop('muon_lr_scale', 0.05)
+        muon_momentum = kwargs.pop('muon_momentum', 0.95)
+        muon_weight_decay = kwargs.pop('muon_weight_decay', 0.01)
+        muon_ns_steps = kwargs.pop('muon_ns_steps', 5)
+        muon_adam_lr = kwargs.pop('muon_adam_lr', None)
+        muon_adam_betas = kwargs.pop('muon_adam_betas', [0.9, 0.95])
+        muon_adam_eps = kwargs.pop('muon_adam_eps', 1e-8)
+        if isinstance(muon_adam_betas, str):
+            muon_adam_betas = [float(b) for b in muon_adam_betas.split(',')]
+        reference_muon_mode = (
+            muon_lr is not None and optim_type_lower == 'genericoptim' and kwargs.get('muon', False)
+        )
+
         if optim_type_lower == 'adamw':
             # TODO: fix this. I'm getting "fatal error: cuda_runtime.h: No such file or directory"
             # when Deepspeed tries to build the fused Adam extension.
@@ -770,9 +786,18 @@ if __name__ == '__main__':
             if 'momentum' in kwargs:
                 kwargs['momentum'] = kwargs['momentum'] ** (1/gas)
 
+            if reference_muon_mode:
+                kwargs['muon_rms_scaling'] = False
+                kwargs['ns_steps'] = muon_ns_steps
+                # One optimizer step per micro-batch: scale momentum/betas so the
+                # decay matches one step per global batch (same as above).
+                muon_momentum = muon_momentum ** (1/gas)
+                muon_adam_betas = [b ** (1/gas) for b in muon_adam_betas]
+
             optimizer_dict = {}
             # Honor a top-level `muon_exclude_prefixes` override (same as the non-GR path).
             exclude_prefixes = config.get('muon_exclude_prefixes', model.get_muon_exclude_prefixes())
+            muon_exclude_adaln = config.get('muon_exclude_adaln', True)
             adapter_low_rank_tags = ('lokr_w', 'lokr_t', 'lora_A', 'lora_B')
             for pg in model.get_param_groups(model_parameters):
                 if isinstance(pg, dict):
@@ -781,10 +806,29 @@ if __name__ == '__main__':
                         param_kwargs = kwargs.copy()
                         param_kwargs['lr'] = pg['lr']
                         name = getattr(p, 'original_name', '')
-                        if any(name.startswith(pre) for pre in exclude_prefixes) or any(tag in name for tag in adapter_low_rank_tags):
+                        is_muon_excluded = any(name.startswith(pre) for pre in exclude_prefixes) or any(tag in name for tag in adapter_low_rank_tags) \
+                                or (muon_exclude_adaln and 'adaln_modulation' in name)
+                        if is_muon_excluded:
                             param_kwargs['muon'] = False
                             param_kwargs['adamuon'] = False
                             param_kwargs['normuon'] = False
+                        if reference_muon_mode:
+                            if is_muon_excluded or p.ndim < 2 or name.startswith('llm_adapter.embed'):
+                                # AdamW fallback param: exact reference aux-AdamW settings.
+                                param_kwargs['muon'] = False
+                                param_kwargs['adamuon'] = False
+                                param_kwargs['normuon'] = False
+                                param_kwargs['weight_decay'] = 0
+                                if muon_adam_lr is not None:
+                                    param_kwargs['lr'] = muon_adam_lr
+                                param_kwargs['betas'] = list(muon_adam_betas)
+                                param_kwargs['eps'] = muon_adam_eps
+                            else:
+                                # Muon param: exact reference Muon settings.
+                                lr_ratio = pg['lr'] / kwargs['lr'] if kwargs.get('lr') else 1.0
+                                param_kwargs['lr'] = muon_lr * muon_lr_scale * lr_ratio
+                                param_kwargs['momentum'] = muon_momentum
+                                param_kwargs['weight_decay'] = muon_weight_decay
                         optimizer_dict[p] = klass([p], **param_kwargs)
                 else:
                     # param
@@ -803,11 +847,17 @@ if __name__ == '__main__':
         elif optim_type_lower == 'genericoptim':
             kwargs['compile'] = config['compile']
             kwargs['mpu'] = pipeline_model.mpu()
+            if reference_muon_mode:
+                # Exact reference Muon math: reference scaling + configurable NS steps.
+                kwargs['muon_rms_scaling'] = False
+                kwargs['ns_steps'] = muon_ns_steps
             # User can override the model's default exclusion list via top-level config key
             # `muon_exclude_prefixes`. Set to [] to disable exclusion entirely (e.g. for SDXL
             # where conv_in/conv_out are conv layers, not embedding/LM-head matrices, and the
             # MMDiT-based "exclude first/last linear" intuition is weaker).
             exclude_prefixes = config.get('muon_exclude_prefixes', model.get_muon_exclude_prefixes())
+            # Match the Anima reference: adaln_modulation weights always use AdamW, never Muon.
+            muon_exclude_adaln = config.get('muon_exclude_adaln', True)
             adapter_low_rank_tags = ('lokr_w', 'lokr_t', 'lora_A', 'lora_B')
             new_param_groups = []
             param_groups = model.get_param_groups(model_parameters)
@@ -820,7 +870,8 @@ if __name__ == '__main__':
                 params_remaining = []
                 for p in params:
                     name = getattr(p, 'original_name', '')
-                    if any(name.startswith(pre) for pre in exclude_prefixes) or any(tag in name for tag in adapter_low_rank_tags):
+                    if any(name.startswith(pre) for pre in exclude_prefixes) or any(tag in name for tag in adapter_low_rank_tags) \
+                            or (muon_exclude_adaln and 'adaln_modulation' in name):
                         params_muon_excluded.append(p)
                     else:
                         params_remaining.append(p)
@@ -839,6 +890,10 @@ if __name__ == '__main__':
                         params_other.append(p)
                 pg_2d = pg.copy()
                 pg_2d['params'] = params_2d
+                if reference_muon_mode:
+                    # Tag the 2D group so the weight-decay split below applies the
+                    # exact reference Muon lr/momentum/weight_decay to it.
+                    pg_2d['_muon_group'] = True
                 if kwargs.get('second_moment_type', None) == 'sn':
                     pg_2d['subset_size'] = 'heuristics'
                 for key in ('rank', 'proj_type', 'update_proj_gap'):
@@ -874,6 +929,28 @@ if __name__ == '__main__':
                 pg_no_wd['muon'] = False
                 pg_no_wd['adamuon'] = False
                 pg_no_wd['normuon'] = False
+            if optim_type_lower == 'genericoptim' and reference_muon_mode:
+                if pg.pop('_muon_group', False) and pg.get('muon', True) is not False:
+                    if pg.get('lr') is not None and kwargs.get('lr'):
+                        lr_ratio = pg['lr'] / kwargs['lr']
+                    else:
+                        lr_ratio = 1.0
+                    pg['lr'] = muon_lr * muon_lr_scale * lr_ratio
+                    pg['momentum'] = muon_momentum
+                    pg['weight_decay'] = muon_weight_decay
+                else:
+                    # AdamW fallback group
+                    if muon_adam_lr is not None:
+                        pg['lr'] = muon_adam_lr
+                    pg['betas'] = list(muon_adam_betas)
+                    pg['eps'] = muon_adam_eps
+                    pg['weight_decay'] = 0
+                # The no-weight-decay group always uses the aux-AdamW settings.
+                pg_no_wd.pop('_muon_group', None)
+                if muon_adam_lr is not None:
+                    pg_no_wd['lr'] = muon_adam_lr
+                pg_no_wd['betas'] = list(muon_adam_betas)
+                pg_no_wd['eps'] = muon_adam_eps
             if len(params_wd) > 0:
                 new_param_groups.append(pg)
             if len(params_no_wd) > 0:

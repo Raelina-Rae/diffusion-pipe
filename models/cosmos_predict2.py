@@ -509,6 +509,11 @@ class CosmosPredict2Pipeline(BasePipeline):
 
         return param_groups
 
+    def get_muon_exclude_prefixes(self):
+        if self.model_config.get('muon_exclude_llm_adapter', True):
+            return ['llm_adapter.']
+        return []
+
     def get_loss_fn(self):
         contrastive_lambda = self.contrastive_flow_lambda
         def loss_fn(output, label):

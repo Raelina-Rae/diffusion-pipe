@@ -150,7 +150,7 @@ def closest_smaller_divisor_of_n_to_k(n: int, k: int) -> int:
 
 
 @torch.compile(dynamic=True, fullgraph=True)
-def zeropower_via_newtonschulz5(G):
+def zeropower_via_newtonschulz5(G, steps=NS_STEPS):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
     quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
@@ -169,7 +169,7 @@ def zeropower_via_newtonschulz5(G):
     # Ensure spectral norm is at most 1
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
     # Perform the NS iterations
-    for _ in range(NS_STEPS):
+    for _ in range(steps):
         A = X @ X.mT
         B = b * A + c * A @ A # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
@@ -315,7 +315,10 @@ class GenericOptim(Optimizer):
             polar_express=False,
             compile=False,
             automagic=False,
-            nesterov=False,
+            nesterov=None,
+            ns_steps=5,
+            muon_rms_scaling=True,
+            momentum=None,
             min_lr=1e-7,
             max_lr=1e-3,
             lr_bump=1e-6, # amount to bump the lr when adjusting
@@ -332,12 +335,25 @@ class GenericOptim(Optimizer):
         self.cpu_offload = cpu_offload
         self.kahan_buffer_offload = kahan_buffer_offload
         self.mpu = mpu
-        self.nesterov = nesterov
-
+        # Muon variants default to Nesterov momentum, matching the reference
+        # implementations (Keller Jordan Muon, Anima trainer). Explicitly setting
+        # nesterov in the optimizer config overrides this.
+        self.nesterov = (muon or adamuon or normuon) if nesterov is None else nesterov
+        # muon_rms_scaling=True (default) uses the Moonlight-style RMS-matched
+        # scaling (0.2 * sqrt(max(rows, cols))), so lr is in AdamW units.
+        # muon_rms_scaling=False uses the exact reference muon-package scaling
+        # (max(1, rows/cols)**0.5), so lr is in spectral-norm units
+        # (e.g. muon_lr * muon_lr_scale = 0.02 * 0.05 from the Anima trainer).
+        self.muon_rms_scaling = muon_rms_scaling
+        self.ns_steps = int(ns_steps)
         if polar_express:
+            if self.ns_steps != len(polar_express_coeffs):
+                print(f'Warning: polar_express uses a fixed {len(polar_express_coeffs)}-step schedule; '
+                      f'ignoring ns_steps={self.ns_steps}')
             self.orthogonalize = polar_express_fn
         else:
-            self.orthogonalize = zeropower_via_newtonschulz5
+            ns = self.ns_steps
+            self.orthogonalize = lambda G: zeropower_via_newtonschulz5(G, steps=ns)
 
         require_version("torch>=1.5.0")  # add_ with alpha
         if lr < 0.0:
@@ -353,13 +369,14 @@ class GenericOptim(Optimizer):
 
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim,
                     'muon': muon, 'adamuon': adamuon, 'normuon': normuon, 'automagic': automagic, 'min_lr': min_lr, 'max_lr': max_lr, 'lr_bump': lr_bump,
-                    'lr_decrease_factor': lr_decrease_factor}
+                    'lr_decrease_factor': lr_decrease_factor, 'momentum': momentum}
         super().__init__(params, defaults)
         self.check_params()
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
               f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}, "
-              f"cpu_offload={cpu_offload}, muon={muon}, adamuon={adamuon}, normuon={normuon}, compile={compile}, automagic={automagic}, nesterov={nesterov}, min_lr={min_lr}, "
+              f"cpu_offload={cpu_offload}, muon={muon}, adamuon={adamuon}, normuon={normuon}, compile={compile}, automagic={automagic}, nesterov={self.nesterov}, "
+              f"momentum={momentum}, ns_steps={self.ns_steps}, muon_rms_scaling={self.muon_rms_scaling}, min_lr={min_lr}, "
               f"max_lr={max_lr}, lr_bump={lr_bump}, lr_decrease_factor={lr_decrease_factor}")
 
     @torch.no_grad()
@@ -419,6 +436,8 @@ class GenericOptim(Optimizer):
                 muon = group['muon'] and can_use_muon
                 adamuon = group['adamuon'] and can_use_muon
                 normuon = group.get('normuon', False) and can_use_muon
+                # Per-group momentum override (used by the reference-mode Muon groups).
+                beta1 = group['momentum'] if group.get('momentum') is not None else group['betas'][0]
 
                 if muon or adamuon or normuon:
                     rows, cols = numerator.shape[-2:]
@@ -426,14 +445,23 @@ class GenericOptim(Optimizer):
                     # mu*M_t + grad to the Newton-Schulz iteration instead of M_t.
                     # Computed before the 4D->2D reshape so p.grad and numerator share shape.
                     if self.nesterov:
-                        numerator = p.grad + group["betas"][0] * numerator
+                        if self.muon_rms_scaling:
+                            numerator = p.grad + beta1 * numerator
+                        else:
+                            numerator = torch.lerp(p.grad, numerator, beta1)
                     if numerator.ndim == 4: # for the case of conv filters
                         numerator = numerator.view(len(numerator), -1)
                     numerator = self.orthogonalize(numerator)
-                    step_size *= 0.2
+                    if self.muon_rms_scaling:
+                        step_size *= 0.2
 
                 if muon:
-                    step_size *= math.sqrt(max(rows, cols))
+                    if self.muon_rms_scaling:
+                        # Moonlight-style RMS-matched scaling: lr is in AdamW units.
+                        step_size *= math.sqrt(max(rows, cols))
+                    else:
+                        # spectral-norm units (muon_lr * muon_lr_scale).
+                        step_size *= max(1.0, rows / cols) ** 0.5
                     denominator = None
                 elif adamuon:
                     denominator = self.get_denominator(group, state, numerator, state_device)
@@ -525,7 +553,9 @@ class GenericOptim(Optimizer):
 
     def get_numerator(self, group, state, p, state_device):
         grad = p.grad
-        beta1, beta2 = group["betas"]
+        # Per-group momentum override (used by the reference-mode Muon groups).
+        beta1 = group['momentum'] if group.get('momentum') is not None else group["betas"][0]
+        beta2 = group["betas"][1]
         if beta1 == 0 or self.momentum_type == "none":
             return grad
 
