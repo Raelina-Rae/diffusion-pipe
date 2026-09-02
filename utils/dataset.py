@@ -768,11 +768,21 @@ class DirectoryDataset:
                 with open(captions_json) as f:
                     caption_data = json.load(f)
 
+                missing_caption_warn_count = 0
+
                 def add_captions(example):
+                    nonlocal missing_caption_warn_count
                     tar_file, image_file = example['image_spec']
                     captions = caption_data.get(image_file, None)
                     if captions is None:
-                        logger.warning(f'Image file {image_file} does not have an entry in captions.json')
+                        missing_caption_warn_count += 1
+                        if missing_caption_warn_count <= 10:
+                            logger.warning(f'Image file {image_file} does not have an entry in captions.json')
+                        elif missing_caption_warn_count == 11:
+                            logger.warning('Further "does not have an entry in captions.json" warnings suppressed. '
+                                           'Note: if these files are caption sidecars (*.caption, *.txt) stored next to '
+                                           'your images, they are being enumerated as images because they do not match '
+                                           'caption_extension. Move them out of the dataset directory to fix this.')
                     else:
                         assert isinstance(captions, list), 'captions.json must contain lists of captions'
                     return {'caption': captions}
@@ -821,8 +831,10 @@ class DirectoryDataset:
 
     def _metadata_map_fn(self):
         tarfile_map = {}
+        missing_caption_warn_count = 0
 
         def fn(example):
+            nonlocal missing_caption_warn_count
             empty_return = {'image_spec': [], 'mask_file': [], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': []}
             # batch size always 1
             caption_file = example['caption_file'][0]
@@ -836,11 +848,17 @@ class DirectoryDataset:
                 with open(caption_file) as f:
                     captions = [f.read().strip()]
             if captions is None:
+                missing_caption_warn_count += 1
+                if missing_caption_warn_count <= 10:
+                    if self.skip_empty_caption:
+                        logger.warning(f'Cound not find caption for {image_file}. Skipping image.')
+                    else:
+                        logger.warning(f'Cound not find caption for {image_file}. Using empty caption.')
+                elif missing_caption_warn_count == 11:
+                    logger.warning('Further "Cound not find caption" warnings suppressed.')
                 if self.skip_empty_caption:
-                    logger.warning(f'Cound not find caption for {image_file}. Skipping image.')
                     return empty_return
                 else:
-                    logger.warning(f'Cound not find caption for {image_file}. Using empty caption.')
                     captions = ['']
             if self.directory_config['shuffle_tags'] and self.shuffle == 0: # backwards compatibility
                 self.shuffle = 1
